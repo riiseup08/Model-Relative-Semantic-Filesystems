@@ -1,12 +1,22 @@
 import numpy as np
-from .core import lm, tokenize, detokenize, quantized_argmax, ModelSession
+from .core import tokenize, detokenize, quantized_argmax, compute_delta, ModelSession
 
 
 def mrsf_inspect(text: str):
     token_ids = tokenize(text)
     n         = len(token_ids)
-    lm.reset()
-    lm.eval(token_ids)
+    delta_dict = {pos: tid for pos, tid in compute_delta(token_ids)}
+
+    # Need raw scores for display — load model and eval
+    from .core import _get_backend
+    backend = _get_backend()
+    lm_obj = backend.get("lm")
+    if lm_obj:
+        lm_obj.reset()
+        lm_obj.eval(token_ids)
+    else:
+        print("[ERROR] mrsf_inspect requires a local provider.")
+        return
 
     print(f"\n{'─'*65}")
     print(f"Document : {text[:80]}")
@@ -16,7 +26,7 @@ def mrsf_inspect(text: str):
 
     surprises = []
     for i in range(n - 1):
-        pred_id    = quantized_argmax(np.array(lm.scores[i]))
+        pred_id    = quantized_argmax(np.array(lm_obj.scores[i]))
         actual_id  = token_ids[i + 1]
         actual_str = detokenize([actual_id]).strip() or f"<id:{actual_id}>"
         pred_str   = detokenize([pred_id]).strip()   or f"<id:{pred_id}>"
@@ -33,33 +43,26 @@ def mrsf_inspect(text: str):
 def mrsf_rebuild_explained(text: str):
     token_ids = tokenize(text)
     n         = len(token_ids)
-    lm.reset()
-    lm.eval(token_ids)
 
-    delta = {}
-    for i in range(n - 1):
-        pred_id   = quantized_argmax(np.array(lm.scores[i]))
-        actual_id = token_ids[i + 1]
-        if pred_id != actual_id:
-            delta[i + 1] = actual_id
+    delta_dict = {pos: tid for pos, tid in compute_delta(token_ids)}
 
     print(f"\n{'═'*65}")
     print(f"REBUILDING: {text[:70]}")
     print(f"{'═'*65}")
     print(f"\n STEP 1 — What Δ stores:")
-    print(f"  {[(pos, detokenize([tid]).strip()) for pos, tid in delta.items()]}")
+    print(f"  {[(pos, detokenize([tid]).strip()) for pos, tid in delta_dict.items()]}")
     print(f"\n STEP 2 — Token by token reconstruction:\n")
     print(f"  {'POS':<5} {'SOURCE':<12} {'RUNNING TEXT'}")
     print(f"  {'─'*65}")
 
-    bos     = tokenize("")[0]          # BOS token ID
+    bos     = tokenize("")[0]
     out_ids = [bos]
     session = ModelSession()
     session.feed(bos)
 
     for i in range(1, n):
-        if i in delta:
-            out_ids.append(delta[i])
+        if i in delta_dict:
+            out_ids.append(delta_dict[i])
             source = "⚡ FROM Δ"
         else:
             out_ids.append(session.predict_next())

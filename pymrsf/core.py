@@ -18,35 +18,58 @@ load_dotenv()
 PROVIDER        = os.getenv("PYMRSF_PROVIDER", "local").lower()
 LOGIT_PRECISION = int(os.getenv("PYMRSF_LOGIT_PRECISION", "6"))
 
+# ── Lazy model loading ────────────────────────────────────────────────────────
+# The LLM model is NOT loaded at import time. It's loaded on first use.
+# This avoids loading a 4GB+ model when you only import for RAG scoring.
 
-# ── Provider: local (llama-cpp) ───────────────────────────────────────────────
+_lm = None
+_lm_loaded = False
 
-if PROVIDER == "local":
-    import numpy as np
-    from llama_cpp import Llama
 
-    GGUF_PATH     = os.getenv("PYMRSF_MODEL_PATH",    "./models/mistral-7b-v0.1.Q4_K_M.gguf")
-    MODEL_VERSION = os.getenv("PYMRSF_MODEL_VERSION", "mistral-7b-q4km-v1")
-    N_CTX         = int(os.getenv("PYMRSF_N_CTX",         "4096"))
-    N_GPU_LAYERS  = int(os.getenv("PYMRSF_N_GPU_LAYERS",  "0"))
-    N_THREADS     = int(os.getenv("PYMRSF_N_THREADS",     str(os.cpu_count())))
+def _ensure_model():
+    """Lazy-load the LLM model on first actual use."""
+    global _lm, _lm_loaded
+    if _lm_loaded:
+        return
+    if PROVIDER == "local":
+        import numpy as np
+        from llama_cpp import Llama
 
-    if not os.path.exists(GGUF_PATH):
-        raise FileNotFoundError(
-            f"\n[pymrsf] Model not found: {GGUF_PATH}\n"
-            f"  Set PYMRSF_MODEL_PATH in your .env"
+        GGUF_PATH     = os.getenv("PYMRSF_MODEL_PATH",    "./models/mistral-7b-v0.1.Q4_K_M.gguf")
+        N_CTX         = int(os.getenv("PYMRSF_N_CTX",         "4096"))
+        N_GPU_LAYERS  = int(os.getenv("PYMRSF_N_GPU_LAYERS",  "0"))
+        N_THREADS     = int(os.getenv("PYMRSF_N_THREADS",     str(os.cpu_count())))
+
+        if not os.path.exists(GGUF_PATH):
+            raise FileNotFoundError(
+                f"\n[pymrsf] Model not found: {GGUF_PATH}\n"
+                f"  Set PYMRSF_MODEL_PATH in your .env"
+            )
+
+        print(f"[pymrsf] Loading local model: {GGUF_PATH}")
+        _lm = Llama(
+            model_path   = GGUF_PATH,
+            n_ctx        = N_CTX,
+            n_gpu_layers = N_GPU_LAYERS,
+            logits_all   = True,
+            verbose      = False,
+            n_threads    = N_THREADS,
         )
+        print(f"[pymrsf] Model loaded.\n")
+        _lm_loaded = True
+    elif PROVIDER == "openai":
+        _lm_loaded = True  # No LLM to load, just mark as ready
+    else:
+        raise ValueError(f"[pymrsf] Unknown provider: '{PROVIDER}'")
 
-    print(f"[pymrsf] Loading local model: {GGUF_PATH}")
-    _lm = Llama(
-        model_path   = GGUF_PATH,
-        n_ctx        = N_CTX,
-        n_gpu_layers = N_GPU_LAYERS,
-        logits_all   = True,
-        verbose      = False,
-        n_threads    = N_THREADS,
-    )
-    print(f"[pymrsf] Model loaded: {MODEL_VERSION}\n")
+
+# ── Local provider ─────────────────────────────────────────────────────────────
+
+def _load_local_backend():
+    """Dynamically load the local LLM backend functions."""
+    import numpy as np
+
+    _ensure_model()
 
     def tokenize(text: str) -> list:
         return _lm.tokenize(text.encode("utf-8"), add_bos=True)
@@ -59,7 +82,7 @@ if PROVIDER == "local":
         q = np.round(np.array(raw_logits, dtype=np.float64), decimals=LOGIT_PRECISION)
         return int(np.argmax(q))
 
-    quantized_argmax = _quantized_argmax  # public alias
+    quantized_argmax = _quantized_argmax
 
     def get_surprises(text: str) -> tuple:
         """Returns (surprises, heatmap, token_count)"""
@@ -88,6 +111,30 @@ if PROVIDER == "local":
 
         return surprises, heatmap, n
 
+    def compute_delta(text_or_ids) -> list:
+        """Compute delta (surprise positions and token IDs).
+
+        Args:
+            text_or_ids: Either a string or a list of token IDs
+
+        Returns:
+            List of (position, token_id) tuples for surprise tokens
+        """
+        if isinstance(text_or_ids, str):
+            ids = tokenize(text_or_ids)
+        else:
+            ids = text_or_ids
+        n = len(ids)
+        _lm.reset()
+        _lm.eval(ids)
+        delta = []
+        for i in range(n - 1):
+            pred   = _quantized_argmax(np.array(_lm.scores[i]))
+            actual = ids[i + 1]
+            if pred != actual:
+                delta.append((i + 1, actual))
+        return delta
+
     # --- Stateful session for O(n) reconstruction ---
     class ModelSession:
         """
@@ -95,6 +142,7 @@ if PROVIDER == "local":
         Feed tokens one by one; predict next token from current state.
         """
         def __init__(self):
+            _ensure_model()
             self.lm = _lm
             self.reset()
 
@@ -106,13 +154,8 @@ if PROVIDER == "local":
         def feed(self, token_id: int):
             """Feed a single token to the model and update internal logits."""
             self.lm.eval([token_id])
-            # scores is a list where each element corresponds to logits after that input token
-            # When we eval([tok]), scores has length 1, and scores[0] has the logits
-            # But actually, scores contains logits for ALL positions evaluated so far
-            # So we want the LAST one
             if len(self.lm.scores) == 0:
                 self._last_logits = None
-                print(f"[WARN] scores is empty after feeding {token_id}")
             else:
                 self._last_logits = self.lm.scores[-1]
 
@@ -122,21 +165,31 @@ if PROVIDER == "local":
                 raise RuntimeError("No logits available. Call feed() first.")
             return _quantized_argmax(np.array(self._last_logits))
 
-    # Keep old name for compatibility (though not recommended)
+    # Legacy O(n²) version
     def next_token_greedy(context_ids: list) -> int:
         """Legacy O(n²) version – use ModelSession instead."""
         _lm.reset()
         _lm.eval(context_ids)
         return _quantized_argmax(np.array(_lm.scores[len(context_ids) - 1]))
 
-    lm = _lm  # exposed for direct access if needed
+    return {
+        "tokenize": tokenize,
+        "detokenize": detokenize,
+        "quantized_argmax": quantized_argmax,
+        "get_surprises": get_surprises,
+        "compute_delta": compute_delta,
+        "ModelSession": ModelSession,
+        "next_token_greedy": next_token_greedy,
+        "lm": _lm,
+    }
 
 
-# ── Provider: openai ──────────────────────────────────────────────────────────
+# ── OpenAI provider ────────────────────────────────────────────────────────────
 
-elif PROVIDER == "openai":
+def _load_openai_backend():
+    """Dynamically load the OpenAI backend functions."""
     try:
-        from openai import OpenAI  # type: ignore
+        from openai import OpenAI
     except ImportError:
         raise ImportError("[pymrsf] OpenAI provider requires: pip install openai")
 
@@ -146,7 +199,7 @@ elif PROVIDER == "openai":
 
     def tokenize(text: str) -> list:
         try:
-            import tiktoken  # type: ignore
+            import tiktoken
             enc = tiktoken.encoding_for_model(MODEL_VERSION)
             return enc.encode(text)
         except Exception as e:
@@ -156,12 +209,18 @@ elif PROVIDER == "openai":
     def detokenize(ids: list) -> str:
         """Convert token IDs back to string. Uses tiktoken if available."""
         try:
-            import tiktoken  # type: ignore
+            import tiktoken
             enc = tiktoken.encoding_for_model(MODEL_VERSION)
             return enc.decode(ids)
         except Exception as e:
             print(f"[pymrsf] Warning: tiktoken decode failed ({e}), falling back to str join")
             return " ".join(str(i) for i in ids)
+
+    def _quantized_argmax(raw_logits) -> int:
+        raise NotImplementedError(
+            "[pymrsf] quantized_argmax is not available for OpenAI provider.\n"
+            "  mrsf_write / mrsf_read require a local model."
+        )
 
     def get_surprises(text: str) -> tuple:
         import math
@@ -191,10 +250,10 @@ elif PROVIDER == "openai":
         n = len(token_logprobs)
         return surprises, heatmap, n
 
-    def next_token_greedy(context_ids: list) -> int:
+    def compute_delta(text_or_ids) -> list:
         raise NotImplementedError(
-            "[pymrsf] next_token_greedy is not available for OpenAI provider.\n"
-            "  mrsf_write / mrsf_read require a local model."
+            "[pymrsf] compute_delta is not available for OpenAI provider.\n"
+            "  mrsf_write requires a local model."
         )
 
     class ModelSession:
@@ -204,26 +263,94 @@ elif PROVIDER == "openai":
                 "  mrsf_write / mrsf_read require a local model."
             )
 
-    lm = None
+    def next_token_greedy(context_ids: list) -> int:
+        raise NotImplementedError(
+            "[pymrsf] next_token_greedy is not available for OpenAI provider.\n"
+            "  mrsf_write / mrsf_read require a local model."
+        )
+
+    return {
+        "tokenize": tokenize,
+        "detokenize": detokenize,
+        "quantized_argmax": _quantized_argmax,
+        "get_surprises": get_surprises,
+        "compute_delta": compute_delta,
+        "ModelSession": ModelSession,
+        "next_token_greedy": next_token_greedy,
+        "lm": None,
+    }
 
 
-# ── Provider: anthropic ───────────────────────────────────────────────────────
+# ── Backend router ─────────────────────────────────────────────────────────────
 
-elif PROVIDER == "anthropic":
-    raise NotImplementedError(
-        "\n[pymrsf] Anthropic / Claude is not supported.\n"
-        "  Anthropic's API does not expose token logprobs — \n"
-        "  which are required for pymrsf's compression calculation.\n"
-        "  Supported providers: local, openai\n"
-        "  See: https://docs.anthropic.com/en/api/messages"
-    )
+_backend = None
 
 
-# ── Unknown provider ──────────────────────────────────────────────────────────
+def _get_backend():
+    global _backend
+    if _backend is None:
+        if PROVIDER == "local":
+            _backend = _load_local_backend()
+        elif PROVIDER == "openai":
+            _backend = _load_openai_backend()
+        elif PROVIDER == "anthropic":
+            raise NotImplementedError(
+                "\n[pymrsf] Anthropic / Claude is not supported.\n"
+                "  Anthropic's API does not expose token logprobs — \n"
+                "  which are required for pymrsf's compression calculation.\n"
+                "  Supported providers: local, openai\n"
+                "  See: https://docs.anthropic.com/en/api/messages"
+            )
+        else:
+            raise ValueError(
+                f"\n[pymrsf] Unknown provider: '{PROVIDER}'\n"
+                f"  Valid options: local, openai\n"
+                f"  Set PYMRSF_PROVIDER in your .env file."
+            )
+    return _backend
 
-else:
-    raise ValueError(
-        f"\n[pymrsf] Unknown provider: '{PROVIDER}'\n"
-        f"  Valid options: local, openai\n"
-        f"  Set PYMRSF_PROVIDER in your .env file."
-    )
+
+# ── Public API (lazy-loaded proxies) ───────────────────────────────────────────
+
+def tokenize(text: str) -> list:
+    return _get_backend()["tokenize"](text)
+
+
+def detokenize(ids: list) -> str:
+    return _get_backend()["detokenize"](ids)
+
+
+def quantized_argmax(raw_logits) -> int:
+    return _get_backend()["quantized_argmax"](raw_logits)
+
+
+def get_surprises(text: str) -> tuple:
+    return _get_backend()["get_surprises"](text)
+
+
+def compute_delta(text_or_ids) -> list:
+    return _get_backend()["compute_delta"](text_or_ids)
+
+
+def next_token_greedy(context_ids: list) -> int:
+    return _get_backend()["next_token_greedy"](context_ids)
+
+
+class ModelSession:
+    def __init__(self):
+        self._session = _get_backend()["ModelSession"]()
+
+    def reset(self):
+        self._session.reset()
+
+    def feed(self, token_id: int):
+        self._session.feed(token_id)
+
+    def predict_next(self) -> int:
+        return self._session.predict_next()
+
+
+lm = None  # not safe to expose directly anymore; use get_surprises() / compute_delta()
+
+# Public constants
+MODEL_VERSION = os.getenv("PYMRSF_MODEL_VERSION", "mistral-7b-q4km-v1")

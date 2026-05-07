@@ -44,7 +44,3 @@ build/
 # OS
 .DS_Store
 Thumbs.db
-*.gguf
-mrsf.db
-mrsf.faiss
-mrsf.faiss.meta

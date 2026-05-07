@@ -1,5 +1,11 @@
+"""
+pymrsf.probe — Knowledge probing: how well does the model know a text?
+
+Given a text, measures compression rate = 1 - (surprise_tokens / total_tokens).
+Higher compression = model knows it better.
+"""
 import numpy as np
-from .core import lm, tokenize, detokenize, quantized_argmax, MODEL_VERSION
+from .core import tokenize, detokenize, quantized_argmax, _get_backend, MODEL_VERSION
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
@@ -31,15 +37,15 @@ def probe(text: str, verbose: bool = False) -> dict:
 
     Returns:
         {
-            "compression"   : float,   # 0.0 – 1.0 (higher = model knows it better)
-            "knowledge_score": int,    # 0 – 100 (human-friendly version of compression)
-            "label"         : str,     # memorized / familiar / common / uncommon / unknown
-            "description"   : str,     # plain-English explanation
-            "token_count"   : int,
-            "surprise_count": int,
-            "surprises"     : list,    # list of (position, token_str) that surprised the model
-            "heatmap"       : list,    # list of {"token": str, "surprised": bool} for visualization
-            "model"         : str,
+            "compression"    : float,   # 0.0 – 1.0 (higher = model knows it better)
+            "knowledge_score": int,     # 0 – 100 (human-friendly version)
+            "label"          : str,     # memorized / familiar / common / uncommon / unknown
+            "description"    : str,     # plain-English explanation
+            "token_count"    : int,
+            "surprise_count" : int,
+            "surprises"      : list,    # list of (position, token_str)
+            "heatmap"        : list,    # list of {"token": str, "surprised": bool}
+            "model"          : str,
         }
     """
     token_ids = tokenize(text)
@@ -48,14 +54,20 @@ def probe(text: str, verbose: bool = False) -> dict:
     if n < 2:
         return {"error": "Text too short to probe (need at least 2 tokens)."}
 
-    lm.reset()
-    lm.eval(token_ids)
+    # Get raw LM object for direct score access
+    backend = _get_backend()
+    lm_obj  = backend.get("lm")
+    if lm_obj is None:
+        return {"error": "Knowledge probing requires a local model provider."}
+
+    lm_obj.reset()
+    lm_obj.eval(token_ids)
 
     surprises = []
     heatmap   = []
 
     for i in range(n - 1):
-        pred_id   = quantized_argmax(np.array(lm.scores[i]))
+        pred_id   = quantized_argmax(np.array(lm_obj.scores[i]))
         actual_id = token_ids[i + 1]
         token_str = detokenize([actual_id]).strip() or f"<{actual_id}>"
         surprised = pred_id != actual_id
@@ -93,7 +105,6 @@ def probe(text: str, verbose: bool = False) -> dict:
 def probe_compare(texts: list[str]) -> list[dict]:
     """
     Probe multiple texts and return them ranked by knowledge score (highest first).
-    Each result includes the original text for reference.
     """
     results = []
     for text in texts:

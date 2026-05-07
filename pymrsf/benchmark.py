@@ -1,6 +1,10 @@
+"""
+pymrsf.benchmark — Compression and latency benchmarks for local model.
+"""
+
 import os, time
 import numpy as np
-from .core import lm, tokenize, quantized_argmax, LOGIT_PRECISION
+from .core import tokenize, quantized_argmax, _get_backend, LOGIT_PRECISION
 from .storage import mrsf_write, mrsf_read, save_index
 from .embeddings import embed
 
@@ -21,6 +25,12 @@ def mrsf_benchmark_canterbury(folder_path: str, max_chars: int = 2000):
     print(f"{'═'*80}")
     print(f"{'FILE':<22} {'CHARS':>6} {'TOKENS':>7} {'Δ':>6} {'COMPRESS':>10} {'BPC':>8} {'TIME(s)':>8}")
     print(f"{'─'*80}")
+
+    backend = _get_backend()
+    lm_obj  = backend.get("lm")
+    if lm_obj is None:
+        print("[ERROR] Benchmark requires a local model provider.")
+        return []
 
     for fname in files:
         path = os.path.join(folder_path, fname)
@@ -45,11 +55,11 @@ def mrsf_benchmark_canterbury(folder_path: str, max_chars: int = 2000):
             t0        = time.time()
             token_ids = tokenize(text)
             n         = len(token_ids)
-            lm.reset()
-            lm.eval(token_ids)
+            lm_obj.reset()
+            lm_obj.eval(token_ids)
             delta = []
             for i in range(n - 1):
-                pred   = quantized_argmax(np.array(lm.scores[i]))
+                pred   = quantized_argmax(np.array(lm_obj.scores[i]))
                 actual = token_ids[i + 1]
                 if pred != actual:
                     delta.append((i + 1, actual))
@@ -110,5 +120,5 @@ def mrsf_latency_benchmark():
 
     print(f"{'─'*75}")
     print(f"Note: Read path ~2600x slower than Zstd — suitable for cold/archival storage.")
-    print(f"{'═'*75}\n")
+    print(f"{'─'*75}\n")
     save_index()
