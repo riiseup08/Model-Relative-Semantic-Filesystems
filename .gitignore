@@ -1,0 +1,50 @@
+# Environment variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+env/
+ENV/
+
+# MRSF database and indexes
+mrsf.db
+mrsf.faiss
+mrsf.faiss.meta
+
+# Results and outputs
+*.csv
+mrsf_results_full.csv
+
+# Large model files
+models/
+*.gguf
+*.tar.gz
+*.bin
+*.safetensors
+
+# Distribution files (can be rebuilt)
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.gguf
+mrsf.db
+mrsf.faiss
+mrsf.faiss.meta
