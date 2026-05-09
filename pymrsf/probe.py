@@ -3,9 +3,33 @@ pymrsf.probe — Knowledge probing: how well does the model know a text?
 
 Given a text, measures compression rate = 1 - (surprise_tokens / total_tokens).
 Higher compression = model knows it better.
+
+**Provider Support**:
+  - ✅ Local: Full knowledge probing with token-level surprises
+  - ❌ OpenAI: Probing not supported (use relevance-based RAG instead)
+  - ❌ Anthropic: Probing not supported (use relevance-based RAG instead)
+
+**When probing is unavailable**:
+  Non-local providers can still use `score_chunk()` and `filter_chunks()` from 
+  the rag module for relevance-based RAG scoring without novelty detection.
+  
+  Example:
+    >>> from pymrsf import score_chunk
+    >>> result = score_chunk(chunk, query)  # Works with all providers
+    >>> # Local: full novelty-aware scoring
+    >>> # OpenAI/Anthropic: relevance-only scoring
+
+**Usage**:
+    >>> from pymrsf import probe, provider_capabilities
+    >>> 
+    >>> # Check if probing is available
+    >>> if provider_capabilities()["supports_probe"]:
+    ...     result = probe("The quick brown fox jumps over the lazy dog.")
+    ...     print(result["knowledge_score"])  # 0-100
+    ...     print(result["label"])  # memorized/familiar/common/uncommon/unknown
 """
 import numpy as np
-from .core import tokenize, detokenize, quantized_argmax, _get_backend, MODEL_VERSION
+from .core import tokenize, detokenize, quantized_argmax, get_backend, get_raw_lm, MODEL_VERSION, provider_capabilities
 
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
@@ -48,27 +72,31 @@ def probe(text: str, verbose: bool = False) -> dict:
             "model"          : str,
         }
     """
+    # Check if probing is available
+    if not provider_capabilities().get("supports_probe", False):
+        return {
+            "error": "Probing requires local provider with full model access",
+            "message": (
+                "\n[pymrsf] Knowledge probing requires the local provider.\n"
+                "  Install with: pip install pymrsf[local]\n"
+                "  And set: PYMRSF_PROVIDER=local\n"
+                "  API providers (OpenAI, Anthropic) don't support this feature.\n"
+            )
+        }
+    
     token_ids = tokenize(text)
     n         = len(token_ids)
 
     if n < 2:
-        return {"error": "Text too short to probe (need at least 2 tokens)."}
-
-    # Get raw LM object for direct score access
-    backend = _get_backend()
-    lm_obj  = backend.get("lm")
-    if lm_obj is None:
         return {
-            "error": (
-                "Knowledge probing requires the local provider.\n"
-                "  OpenAI and Anthropic APIs don't expose full token logprobs.\n"
-                "  To use this feature:\n"
-                "    pip install pymrsf[local]\n"
-                "    Set PYMRSF_PROVIDER=local in your .env\n"
-                "  For API-based RAG scoring (without probing), use score_chunk() instead."
-            )
+            "error": "Text too short to probe",
+            "message": "Text must contain at least 2 tokens for probing. Received text with 0-1 tokens."
         }
 
+    # Get raw LM object for direct score access
+    backend = get_backend()
+    lm_obj  = backend.get("lm") or get_raw_lm()
+    
     lm_obj.reset()
     lm_obj.eval(token_ids)
 
@@ -114,14 +142,38 @@ def probe(text: str, verbose: bool = False) -> dict:
 def probe_compare(texts: list[str]) -> list[dict]:
     """
     Probe multiple texts and return them ranked by knowledge score (highest first).
+    
+    Texts that fail to probe (e.g., too short or provider doesn't support probing)
+    are included in results but sorted to the end with knowledge_score of -1.
+    
+    Args:
+        texts: List of text strings to probe
+        
+    Returns:
+        List of probe results, sorted by knowledge_score (descending)
+        
+    Example:
+        >>> results = probe_compare([
+        ...     "The quick brown fox",
+        ...     "Neural networks learn by backpropagation",
+        ...     "My secret proprietary algorithm XYZ-9000"
+        ... ])
+        >>> for r in results:
+        ...     print(f"{r['text'][:30]}: {r['knowledge_score']}")
     """
     results = []
     for text in texts:
         r = probe(text)
         r["text"] = text
+        
+        # Handle error cases: set knowledge_score to -1 so they sort to the end
+        if "error" in r and "knowledge_score" not in r:
+            r["knowledge_score"] = -1
+            
         results.append(r)
 
-    results.sort(key=lambda x: x["knowledge_score"], reverse=True)
+    # Sort by knowledge_score, errors (score=-1) go to the end
+    results.sort(key=lambda x: x.get("knowledge_score", -1), reverse=True)
     return results
 
 

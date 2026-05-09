@@ -1,21 +1,48 @@
 import numpy as np
-from .core import tokenize, detokenize, quantized_argmax, compute_delta, ModelSession
+from .core import tokenize, detokenize, quantized_argmax, compute_delta, ModelSession, get_backend, get_raw_lm, provider_capabilities
 
 
-def mrsf_inspect(text: str):
+def mrsf_inspect(text: str, return_data: bool = False):
+    """Inspect delta compression for a text document.
+    
+    Args:
+        text: Text to inspect
+        return_data: If True, return structured dict instead of printing
+    
+    Returns:
+        dict if return_data=True, containing:
+          - surprises: list of surprise token strings
+          - compression: float (0-1)
+          - token_count: int
+          - surprise_count: int
+    """
+    # Check if inspection is available
+    if not provider_capabilities().get("supports_logits", False):
+        error_msg = (
+            "[ERROR] mrsf_inspect requires the local provider with raw model access.\n"
+            "  Install with: pip install pymrsf[local]\n"
+            "  And set: PYMRSF_PROVIDER=local"
+        )
+        if return_data:
+            return {"error": error_msg}
+        print(error_msg)
+        return
+    
     token_ids = tokenize(text)
     n         = len(token_ids)
     delta_dict = {pos: tid for pos, tid in compute_delta(token_ids)}
 
     # Need raw scores for display — load model and eval
-    from .core import _get_backend
-    backend = _get_backend()
-    lm_obj = backend.get("lm")
+    backend = get_backend()
+    lm_obj = backend.get("lm") or get_raw_lm()
     if lm_obj:
         lm_obj.reset()
         lm_obj.eval(token_ids)
     else:
-        print("[ERROR] mrsf_inspect requires a local provider.")
+        error_msg = "[ERROR] mrsf_inspect requires a local provider."
+        if return_data:
+            return {"error": error_msg}
+        print(error_msg)
         return
 
     print(f"\n{'─'*65}")
@@ -38,9 +65,43 @@ def mrsf_inspect(text: str):
     print(f"{'─'*65}")
     print(f"Surprise tokens in Δ : {surprises}")
     print(f"Compression          : {1 - len(surprises) / max(n-1, 1):.1%}\n")
+    
+    # Return structured data if requested
+    if return_data:
+        return {
+            "surprises": surprises,
+            "compression": 1 - len(surprises) / max(n-1, 1),
+            "token_count": n,
+            "surprise_count": len(surprises),
+        }
 
 
-def mrsf_rebuild_explained(text: str):
+def mrsf_rebuild_explained(text: str, return_data: bool = False):
+    """Explain step-by-step how delta reconstruction works.
+    
+    Args:
+        text: Text to rebuild
+        return_data: If True, return structured dict instead of printing
+    
+    Returns:
+        dict if return_data=True, containing:
+          - match: bool (whether rebuild matches original)
+          - original: str
+          - rebuilt: str
+          - steps: list of (pos, source, token) tuples
+    """
+    # Check if rebuild is available
+    if not provider_capabilities().get("supports_delta", False):
+        error_msg = (
+            "[ERROR] mrsf_rebuild_explained requires the local provider.\n"
+            "  Install with: pip install pymrsf[local]\n"
+            "  And set: PYMRSF_PROVIDER=local"
+        )
+        if return_data:
+            return {"error": error_msg}
+        print(error_msg)
+        return
+    
     token_ids = tokenize(text)
     n         = len(token_ids)
 
@@ -59,6 +120,8 @@ def mrsf_rebuild_explained(text: str):
     out_ids = [bos]
     session = ModelSession()
     session.feed(bos)
+    
+    steps = []  # For structured data return
 
     for i in range(1, n):
         if i in delta_dict:
@@ -71,13 +134,25 @@ def mrsf_rebuild_explained(text: str):
 
         # Exclude BOS token when showing running text
         running = detokenize(out_ids[1:]).strip()
-        print(f"  {i:<5} {source:<12} {running[:60]}")
+        token_str = detokenize([out_ids[-1]]).strip()
+        steps.append((i, source, token_str))
+        if not return_data:
+            print(f"  {i:<5} {source:<12} {running[:60]}")
 
     # Exclude BOS token for final comparison
     rebuilt = detokenize(out_ids[1:]).strip()
+    match = rebuilt == text.strip()
+    
+    if return_data:
+        return {
+            "match": match,
+            "original": text,
+            "rebuilt": rebuilt,
+            "steps": steps,
+        }
+    
     print(f"\n{'═'*65}")
     print(f" ORIGINAL : {text}")
     print(f" REBUILT  : {rebuilt}")
-    match = rebuilt == text.strip()
     print(f" MATCH    : {'✅ Perfect reconstruction' if match else '⚠️  Minor tokenization diff'}")
     print(f"{'═'*65}\n")

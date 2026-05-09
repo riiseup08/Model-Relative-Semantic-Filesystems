@@ -113,14 +113,20 @@ pip install -e .[all]
 
 | Feature | Local | OpenAI | Anthropic |
 |---------|-------|--------|-----------|
-| RAG Chunk Scoring | ✅ | ✅ | ✅ |
-| Knowledge Probing | ✅ | ❌ | ❌ |
+| RAG Chunk Scoring | ✅ Full | ⚠️ Relevance-only | ⚠️ Relevance-only |
+| Knowledge Probing | ✅ Full | ⚠️ Limited | ❌ |
 | Delta Compression | ✅ | ❌ | ❌ |
 | Async Support | ✅ | ✅ | ✅ |
 | Caching | ✅ | ✅ | ✅ |
 | Setup Difficulty | Hard | Easy | Easy |
 | Cost | Free | $$ | $$ |
 | Privacy | Private | API | API |
+
+**⚠️ Important Notes:**
+- **Embeddings**: All providers currently require [Ollama](https://ollama.ai/) running locally for embedding generation (uses `nomic-embed-text` by default)
+- **API Approximations**: OpenAI/Anthropic providers use logprob-based approximations for surprise detection. Results are less precise than local models but still effective for RAG scoring.
+- See **[PROVIDER_SUPPORT.md](PROVIDER_SUPPORT.md)** for the complete feature matrix and capability details.
+- See **[ENV_CONFIG.md](ENV_CONFIG.md)** for all environment variable configuration options.
 
 ## Features
 
@@ -147,39 +153,63 @@ weights = {"novelty": 0.5, "relevance": 0.3, "query_ignorance": 0.2}
 result = score_chunk(chunk, query, weights=weights)
 ```
 
-### 🔍 Knowledge Probing
+### 🔍 Knowledge Probing (Local/OpenAI Only)
+
+Test how well the model knows specific information:
 
 ```python
-from pymrsf import probe
+from pymrsf import probe, provider_capabilities
 
-result = probe("To be or not to be, that is the question.")
-print(f"Knowledge: {result['knowledge_score']}/100 ({result['label']})")
-# → Knowledge: 92/100 (memorized) — Shakespeare is well-known
-
-result = probe("My proprietary algorithm uses a novel attention mechanism.")
-print(f"Knowledge: {result['knowledge_score']}/100 ({result['label']})")
-# → Knowledge: 15/100 (unknown) — novel content!
+# Check if probing is available
+caps = provider_capabilities()
+if caps["supports_probe"]:
+    result = probe("To be or not to be, that is the question.")
+    print(f"Knowledge: {result['knowledge_score']}/100 ({result['label']})")
+    # → Knowledge: 92/100 (memorized) — Shakespeare is well-known
+    
+    result = probe("My proprietary algorithm uses a novel attention mechanism.")
+    print(f"Knowledge: {result['knowledge_score']}/100 ({result['label']})")
+    # → Knowledge: 15/100 (unknown) — novel content!
+    
+    # Get detailed token-level analysis
+    print(f"Surprises: {result['surprises']}")  # Which tokens were unpredictable
+else:
+    print(f"Probing not available with {caps['provider']} provider")
 ```
 
-### 🔧 RAG Pipeline Filter
+**Provider Support:**
+- ✅ **Local**: Full precision surprise detection
+- ⚠️ **OpenAI**: Approximate via logprobs (less precise but functional)
+- ❌ **Anthropic**: Not supported
+
+### 🔧 RAG Pipeline Filter (All Providers)
+
+Complete pipeline: retrieve chunks, score them, filter to the best ones:
 
 ```python
 from pymrsf.rag import filter_chunks
 
-chunks = retriever.get(query, top_k=20)   # your retriever
+# Your existing retriever (FAISS, Pinecone, etc.)
+chunks = retriever.get(query, top_k=20)
 
-# Only keep chunks worth sending to the LLM
+# Filter to only useful chunks
 good = filter_chunks(
     chunks,
     query,
-    min_rag_score=50,      # skip low-value chunks
-    top_k=5,                # limit context window usage
-    diversity_threshold=0.85,  # dedup similar chunks
+    min_rag_score=50,         # skip low-value chunks
+    top_k=5,                  # limit context window usage
+    diversity_threshold=0.85, # dedup similar chunks
     verbose=True,
 )
 
+# Use filtered chunks in your LLM prompt
 answer = llm.complete(query, context=good)
+
+# Save context window tokens!
+print(f"Reduced {len(chunks)} chunks to {len(good)} high-value chunks")
 ```
+
+**Works with all providers** - automatically adapts to available features.
 
 ### ⚡ Performance Features (NEW in v0.4)
 
@@ -228,20 +258,202 @@ cache.clear_cache()
 
 **Performance Benefits:**
 - 🚀 **Async**: 3-5x faster with API providers (OpenAI, Anthropic)
-- 💾 **Caching**: Near-instant for repeated chunks (~100x speedup)
-- 🔄 **Combined**: Up to 10x throughput improvement in production
+- 💾 **Caching**: Near-inStorage (Local Only, Experimental)
 
-**Note**: Async is designed for API providers. Local models work best with synchronous functions.
-
-See [PERFORMANCE.md](PERFORMANCE.md) for detailed benchmarks and best practices.
-
-See [example_performance.py](example_performance.py) for runnable benchmarks.
-
-### 📦 Delta Compression (Experimental)
-
-Store text efficiently using LLM surprises:
+Store documents efficiently by saving only "surprise" tokens (40-60% compression on average):
 
 ```python
+from pymrsf import mrsf_write, mrsf_read, save_index, load_index, provider_capabilities
+
+# Check if delta compression is available
+caps = provider_capabilities()
+if caps["supports_delta"]:
+    # Store documents with semantic search + delta compression
+    doc1 = mrsf_write("The Eiffel Tower was built in 1889 for the World's Fair.")
+    doc2 = mrsf_write("Neural networks learn by adjusting weights through backprop.")
+    doc3 = mrsf_write("Python is a popular programming language.")
+    
+    print(f"Doc1: {doc1['compression']:.1%} compression")
+    # → 45.2% compression
+    
+    # Save FAISS index to disk
+    save_index()
+    
+    # Later: Load index and search
+    load_index()
+    results = mrsf_read("tell me about the Eiffel Tower", top_k=1)
+   Complete Examples
+
+### Quick Start: OpenAI Provider (Recommended for First-Time Users)
+
+```python
+import os
+os.environ["PYMRSF_PROVIDER"] = "openai"
+os.environ["OPENAI_API_KEY"] = "sk-..."
+Quick Setup
+
+Choose your provider and create a `.env` file:
+
+**OpenAI (Easiest):**
+```bash
+PYMRSF_PROVIDER=openai
+OPENAI_API_KEY=sk-...
+
+# Embeddings (required for all providers)
+PYMRSF_OLLAMA_BASE=http://localhost:11434  # default
+PYMRSF_EMBED_MODEL=nomic-embed-text        # default
+```
+
+**Anthropic:**
+```bash
+PYMRSF_PROVIDER=anthropic
+ANTHROPIC_API_KEY=sk-ant-...
+
+# Embeddings (required)
+PYMRSF_OLLAMA_BASE=http://localhost:11434
+PYMRSF_EMBED_MODEL=nomic-embed-text
+```
+
+**Local (Full Features):**
+```bash
+PYMRSF_PROVIDER=local  # default
+PYMRSF_MODEL_PATH=./models/mistral-7b-v0.1.Q4_K_M.gguf
+PYMRSF_N_GPU_LAYERS=0  # set to 20-32 for GPU acceleration
+PYMRSF_N_CTX=4096
+
+# Embeddings (required)
+PYMRSF_OLLAMA_BASE=http://localhost:11434
+PYMRSF_EMBED_MODEL=nomic-embed-text
+```
+
+### Embeddings Setup (Required for All Providers)
+
+**All providers require Ollama for embeddings:**
+
+1. Install Ollama: https://ollama.ai/
+2. Pull the embedding model:
+   ```bash
+   ollama pull nomic-embed-text
+   ```
+3. Ollama will run on `http://localhost:11434` by default
+
+**Alternative embedding models:**
+- `mxbai-embed-large` - Higher quality, slower
+- `all-minilm` - Faster, lower quality
+
+Set via `PYMRSF_EMBED_MODEL` environment variable.
+
+### Where to Get Local Models
+
+- [Mistral 7B GGUF](https://huggingface.co/TheBloke/Mistral-7B-v0.1-GGUF) (recommended, ~4GB)
+- [Llama 2 7B GGUF](https://huggingface.co/TheBloke/Llama-2-7B-GGUF)
+- Any GGUF model from [TheBloke on Hugging Face](https://huggingface.co/TheBloke)
+
+### Complete Configuration Reference
+
+See **[ENV_CONFIG.md](ENV_CONFIG.md)** for all 15+ environment variables and example `.env` files for each provider.
+from pymrsf.rag import score_chunks
+How It Works
+
+### RAG Score Formula
+```
+rag_score = novelty × 0.40 + relevance × 0.40 + query_ignorance × 0.20
+```
+
+**Components:**
+- **Novelty**: How much new information does the chunk contain? (Measured via compression rate - unpredictable tokens indicate novelty)
+- **Relevance**: How related is the chunk to the query? (Cosine similarity between embeddings)
+- **Query Ignorance**: Does the model not know the answer? (Probing query compression - if model already knows the answer, chunks are less useful)
+
+**Custom Weights:**
+```python
+weights = {"novelty": 0.5, "relevance": 0.3, "query_ignorance": 0.2}
+result = score_chunk(chunk, query, weights=weights)
+```
+
+### Score Interpretation
+
+| Score | Verdict | Action |
+|-------|---------|--------|
+| 80-100 | Excellent | Prioritize this chunk |
+| 60-79 | Good | Include in context |
+| 40-59 | Moderate | Include if space allows |
+| 20-39 | Weak | Skip if better chunks exist |
+| 0-19 | Skip | Model already knows this |
+
+### Provider-Specific Behavior
+
+**Local Provider:**
+- Full novelty detection via token-level surprise
+- Precise knowledge probing
+- Best results, highest computational cost
+
+**OpenAI Provider:**
+- Novelty approximated via logprobs (less precise but effective)
+- Limited knowledge probing (logprob-based)
+- Fast, API-based, good for production
+
+**Anthropic Provider:**
+- Relevance-only scoring (no novelty detection)
+- No knowledge probing
+- Basic but functional for simple RAG pipelines
+from pymrsf import probe, provider_capabilities
+from pymrsf.rag import score_chunk, filter_chunks
+from pymrsf import mrsf_write, mrsf_read, save_index
+
+# Check available features
+caps = provider_capabilities()
+print(f"Provider: {caps['provider']}")
+print(f"Supports probing: {caps['supports_probe']}")
+print(f"Supports delta compression: {caps['supports_delta']}")
+
+# Knowledge probing
+result = probe("To be or not to be")
+print(f"Model knows this {result['knowledge_score']}/100")
+
+# RAdditional Documentation
+
+- **[PROVIDER_SUPPORT.md](PROVIDER_SUPPORT.md)** - Complete feature matrix by provider, capability checks, recommended use cases
+- **[ENV_CONFIG.md](ENV_CONFIG.md)** - All environment variables, example `.env` files for each provider
+- **[PERFORMANCE.md](PERFORMANCE.md)** - Benchmarks, optimization tips, async best practices
+- **[CHANGELOG.md](CHANGELOG.md)** - Version history and migration guides
+
+## Project Status
+
+**v0.4 - Beta** — Core RAG novelty scoring is stable and production-ready. Multi-provider support is fully functional. Delta compression storage is experimental (local provider only).
+
+**What's stable:**
+- ✅ RAG chunk scoring (all providers)
+- ✅ Knowledge probing (local/OpenAI)
+- ✅ Async support (all providers)
+- ✅ Caching system
+
+**What's experimental:**
+- ⚠️ Delta compression storage (works but API may change)
+- ⚠️ Anthropic provider (basic functionality only)
+
+# Delta compression storage
+doc = mrsf_write("The Eiffel Tower was built in 1889.")
+print(f"Compression: {doc['compression']:.1%}")
+save_index()
+
+# Semantic retrieval
+results = mrsf_read("famous French landmark", top_k=1)
+print(results[0])  # Reconstructed text
+```
+    print("Delta compression requires local provider")
+    print("Install with: pip install pymrsf[local]")
+```
+
+**How it works:**
+1. Text is tokenized and fed to the model
+2. Only "surprising" tokens (where prediction ≠ actual) are stored
+3. Reconstruction uses the model to predict missing tokens
+4. FAISS provides semantic search over embedded documents
+
+**Use cases:** Cold storage, archival systems, research datasets
+
+**Performance:** ~40-60% compression on average, O(n) reconstruction timepython
 from pymrsf import mrsf_write, mrsf_read, save_index
 
 # Write (stores only surprise tokens = ~40% compression)

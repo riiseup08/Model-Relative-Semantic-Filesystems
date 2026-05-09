@@ -16,6 +16,37 @@ Installation:
   pip install pymrsf[anthropic] # for Anthropic API
   pip install pymrsf[all]       # everything
 
+Feature Support Matrix:
+┌─────────────────────────┬───────┬─────────┬────────────┐
+│ Feature                 │ Local │ OpenAI  │ Anthropic  │
+├─────────────────────────┼───────┼─────────┼────────────┤
+│ tokenize/detokenize     │   ✓   │   ✓*    │     ✓*     │
+│ embeddings              │   ✓   │   ✓     │     ✓      │
+│ surprises (logits)      │   ✓   │   ✓**   │     ✗      │
+│ delta compression       │   ✓   │   ✗     │     ✗      │
+│ knowledge probing       │   ✓   │   ✗     │     ✗      │
+│ stateful sessions       │   ✓   │   ✗     │     ✗      │
+│ raw model access        │   ✓   │   ✗     │     ✗      │
+└─────────────────────────┴───────┴─────────┴────────────┘
+
+  * Approximations via tiktoken (not true tokenization)
+ ** Limited via API logprobs (threshold-based, not argmax)
+
+Local-Only Functions:
+  - compute_delta()     : requires exact token prediction
+  - ModelSession        : requires KV cache access
+  - get_raw_lm()        : requires direct model object
+  - mrsf_write()        : requires delta compression
+  - mrsf_inspect()      : requires raw logits
+  - probe()             : requires token-level surprises
+
+Multi-Provider Functions:
+  - tokenize()          : available everywhere (may be approximate)
+  - detokenize()        : available everywhere (may be approximate)
+  - embed()             : available everywhere
+  - score_chunk()       : available everywhere (degrades gracefully)
+  - filter_chunks()     : available everywhere (degrades gracefully)
+
 Note: Advanced features (knowledge probing, compression) require local provider.
 """
 
@@ -472,44 +503,246 @@ def _get_backend():
 # ── Public API (lazy-loaded proxies) ───────────────────────────────────────────
 
 def tokenize(text: str) -> list:
+    """
+    Convert text to token IDs.
+    
+    Multi-provider: Available with all providers.
+    - Local: Uses llama-cpp-python tokenizer (exact)
+    - OpenAI/Anthropic: Uses tiktoken approximation
+    
+    Returns:
+        List of token IDs
+    """
     return _get_backend()["tokenize"](text)
 
 
 def detokenize(ids: list) -> str:
+    """
+    Convert token IDs back to text.
+    
+    Multi-provider: Available with all providers.
+    - Local: Uses llama-cpp-python detokenizer (exact)
+    - OpenAI/Anthropic: Uses tiktoken approximation
+    
+    Returns:
+        Decoded text string
+    """
     return _get_backend()["detokenize"](ids)
 
 
 def quantized_argmax(raw_logits) -> int:
+    """
+    Get the argmax of logits with quantization.
+    
+    Local-only: Requires direct access to raw logits.
+    
+    Args:
+        raw_logits: Raw logit array from model
+        
+    Returns:
+        Token ID with highest logit value
+        
+    Raises:
+        NotImplementedError: If called with non-local provider
+    """
     return _get_backend()["quantized_argmax"](raw_logits)
 
 
 def get_surprises(text: str) -> tuple:
+    """
+    Get token-level surprise information.
+    
+    Provider support varies:
+    - Local: Full token-level exact surprises via argmax
+    - OpenAI: Limited threshold-based surprises via API logprobs
+    - Anthropic: Not supported (no logprobs available)
+    
+    Returns:
+        (surprises, heatmap, token_count) tuple
+    """
     return _get_backend()["get_surprises"](text)
 
 
 def compute_delta(text_or_ids) -> list:
+    """
+    Compute delta (surprise positions and token IDs) for compression.
+    
+    Local-only: Requires exact token prediction via argmax.
+    
+    Args:
+        text_or_ids: Either a string or list of token IDs
+        
+    Returns:
+        List of (position, token_id) tuples for surprise tokens
+        
+    Raises:
+        NotImplementedError: If called with non-local provider
+    """
     return _get_backend()["compute_delta"](text_or_ids)
 
 
 def next_token_greedy(context_ids: list) -> int:
+    """
+    Predict next token greedily (legacy O(n²) version).
+    
+    Local-only: Requires direct model access.
+    Use ModelSession instead for O(n) performance.
+    
+    Args:
+        context_ids: List of token IDs for context
+        
+    Returns:
+        Predicted next token ID
+        
+    Raises:
+        NotImplementedError: If called with non-local provider
+    """
     return _get_backend()["next_token_greedy"](context_ids)
 
 
 class ModelSession:
+    """
+    Stateful session for incremental token generation.
+    
+    Local-only: Requires KV cache access.
+    
+    Maintains model state for O(n) reconstruction instead of O(n²).
+    Feed tokens one by one; predict next token from current state.
+    
+    Example:
+        >>> session = ModelSession()
+        >>> session.reset()
+        >>> session.feed(token_id)
+        >>> next_tok = session.predict_next()
+    
+    Raises:
+        NotImplementedError: If instantiated with non-local provider
+    """
     def __init__(self):
         self._session = _get_backend()["ModelSession"]()
 
     def reset(self):
+        """Reset model state (clear KV cache)."""
         self._session.reset()
 
     def feed(self, token_id: int):
+        """Feed a single token to update model state."""
         self._session.feed(token_id)
 
     def predict_next(self) -> int:
+        """Return the greedy next token based on current state."""
         return self._session.predict_next()
 
 
-lm = None  # not safe to expose directly anymore; use get_surprises() / compute_delta()
+lm = None  # not safe to expose directly anymore; use get_raw_lm() instead
 
-# Public constants
-MODEL_VERSION = os.getenv("PYMRSF_MODEL_VERSION", "mistral-7b-q4km-v1")
+
+# ── Provider capabilities ──────────────────────────────────────────────────────
+
+def provider_capabilities() -> dict:
+    """
+    Returns a dictionary describing what features are available with the current provider.
+    
+    Use this to check feature availability at runtime before calling provider-specific functions.
+    
+    Returns:
+        {
+            "provider": str,              # "local", "openai", or "anthropic"
+            "supports_logits": bool,      # Full logit access (quantized_argmax)
+            "supports_probe": bool,       # Knowledge probing
+            "supports_delta": bool,       # Delta compression
+            "supports_sessions": bool,    # Stateful KV-cached generation
+            "supports_true_surprises": bool,  # Token-level exact surprise detection
+            "supports_embeddings": bool,  # Semantic embeddings
+            "supports_tokenization": bool,  # Tokenization (may be approximate)
+        }
+    
+    Example:
+        >>> caps = provider_capabilities()
+        >>> if caps["supports_probe"]:
+        ...     result = probe("Hello world")
+        >>> else:
+        ...     print("Probing unavailable with this provider")
+    """
+    capabilities = {
+        "provider": PROVIDER,
+        "supports_tokenization": True,  # All providers (may be approximate)
+        "supports_embeddings": True,    # All providers support embeddings
+    }
+    
+    if PROVIDER == "local":
+        capabilities.update({
+            "supports_logits": True,
+            "supports_probe": True,
+            "supports_delta": True,
+            "supports_sessions": True,
+            "supports_true_surprises": True,
+        })
+    elif PROVIDER == "openai":
+        capabilities.update({
+            "supports_logits": False,      # No raw logits
+            "supports_probe": False,       # Needs exact surprises
+            "supports_delta": False,       # Needs exact surprises
+            "supports_sessions": False,    # No KV cache access
+            "supports_true_surprises": False,  # Only threshold-based via API
+        })
+    elif PROVIDER == "anthropic":
+        capabilities.update({
+            "supports_logits": False,
+            "supports_probe": False,
+            "supports_delta": False,
+            "supports_sessions": False,
+            "supports_true_surprises": False,
+        })
+    
+    return capabilities
+
+
+def get_backend():
+    """
+    Public accessor for the backend dictionary.
+    Returns the loaded backend with all provider-specific functions.
+    """
+    return _get_backend()
+
+
+def get_raw_lm():
+    """
+    Get direct access to the underlying language model object.
+    Only available with local provider.
+    
+    Returns:
+        The llama_cpp.Llama object for local provider, or None for API providers.
+        
+    Raises:
+        NotImplementedError if called with a provider that doesn't support raw access.
+    """
+    backend = _get_backend()
+    lm_obj = backend.get("lm")
+    
+    if lm_obj is None and PROVIDER != "local":
+        raise NotImplementedError(
+            f"\n[pymrsf] Raw model access not available with {PROVIDER} provider.\n"
+            f"  This feature requires the local provider.\n"
+            f"  Install with: pip install pymrsf[local]\n"
+            f"  And set: PYMRSF_PROVIDER=local\n"
+        )
+    
+    return lm_obj
+
+
+# ── MODEL_VERSION (provider-aware) ─────────────────────────────────────────────
+
+def _get_model_version() -> str:
+    """Get the current model version string based on provider."""
+    if PROVIDER == "local":
+        return os.getenv("PYMRSF_MODEL_VERSION", "mistral-7b-q4km-v1")
+    elif PROVIDER == "openai":
+        return os.getenv("PYMRSF_MODEL_VERSION", "gpt-3.5-turbo")
+    elif PROVIDER == "anthropic":
+        return os.getenv("PYMRSF_MODEL_VERSION", "claude-3-5-sonnet-20241022")
+    else:
+        return "unknown"
+
+
+MODEL_VERSION = _get_model_version()

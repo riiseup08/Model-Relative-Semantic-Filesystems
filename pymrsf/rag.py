@@ -37,10 +37,16 @@ Caching:
 import asyncio
 import numpy as np
 from typing import Optional, List, Dict, Any
-from .probe import probe
 from .embeddings import embed
-from .core import ModelSession
+from .core import ModelSession, provider_capabilities
 from . import cache
+
+# Conditional import for probe (only available with certain providers)
+_probe_available = provider_capabilities().get("supports_probe", False)
+if _probe_available:
+    from .probe import probe
+else:
+    probe = None
 
 
 # ── Default weights ───────────────────────────────────────────────────────────
@@ -53,6 +59,46 @@ DEFAULT_WEIGHTS = {
     "relevance": 0.40,
     "query_ignorance": 0.20,
 }
+
+# ── Weight validation ──────────────────────────────────────────────────────────
+
+def _validate_and_normalize_weights(weights: dict = None) -> tuple[dict, bool]:
+    """
+    Validate and normalize weights for RAG scoring.
+    
+    Returns:
+        (normalized_weights, is_valid) tuple
+    """
+    if weights is None:
+        return DEFAULT_WEIGHTS.copy(), True
+    
+    # Check required keys exist
+    required_keys = set(DEFAULT_WEIGHTS.keys())
+    provided_keys = set(weights.keys())
+    
+    if not required_keys.issubset(provided_keys):
+        missing = required_keys - provided_keys
+        # Fill in missing keys with defaults
+        w = DEFAULT_WEIGHTS.copy()
+        w.update(weights)
+        weights = w
+    
+    # Check all values are numeric
+    try:
+        w = {k: float(weights[k]) for k in required_keys}
+    except (ValueError, TypeError):
+        # Non-numeric values, fall back to defaults
+        return DEFAULT_WEIGHTS.copy(), False
+    
+    # Normalize if sum is not close to 1.0
+    total = sum(w.values())
+    if abs(total - 1.0) > 0.01:  # Allow small floating point errors
+        if total > 0:  # Normalize
+            w = {k: v / total for k, v in w.items()}
+        else:  # Invalid weights, use defaults
+            return DEFAULT_WEIGHTS.copy(), False
+    
+    return w, True
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -126,42 +172,73 @@ def score_chunk(
             "cached"             : bool,  # whether this result came from cache
         }
     """
+    # Validate and normalize weights
+    w, weights_valid = _validate_and_normalize_weights(weights)
+    if not weights_valid and verbose:
+        print("[warn] Invalid weights provided, using defaults")
+    
     # Check cache first (only if not using session for incremental scoring)
+    # Cache key includes normalized weights to avoid collisions
     if use_cache and session is None:
-        cached_result = cache.get_cached_score(chunk, query, weights)
+        cached_result = cache.get_cached_score(chunk, query, w)
         if cached_result is not None:
             cached_result["cached"] = True
             if verbose:
-                _print_chunk_report(cached_result, query, weights or DEFAULT_WEIGHTS)
+                _print_chunk_report(cached_result, query, w)
             return cached_result
+
+    # Determine scoring mode based on provider capabilities
+    caps = provider_capabilities()
+    probe_available = caps.get("supports_probe", False)
+    embedding_available = caps.get("supports_embeddings", True)
     
-    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    scoring_mode = "full" if probe_available else "relevance_only"
+    
+    # Step 1 — probe the chunk (or fallback to relevance-only mode)
+    if probe_available and probe is not None:
+        r_chunk = probe(chunk)
+        # Don't abort on probe failure - use fallback mode instead
+        if "error" in r_chunk:
+            # Probe failed - fallback to relevance-only
+            knowledge_score = 0
+            novelty_score   = 100
+            scoring_mode = "relevance_only"
+            r_chunk = {
+                "token_count": len(chunk.split()),
+                "surprise_count": 0,
+            }
+        else:
+            knowledge_score = r_chunk["knowledge_score"]
+            novelty_score   = 100 - knowledge_score
+    else:
+        # Fallback: when probing unavailable, treat all chunks as novel
+        # (novelty scoring will be skipped, rely on relevance only)
+        knowledge_score = 0
+        novelty_score   = 100
+        r_chunk = {
+            "token_count": len(chunk.split()),
+            "surprise_count": 0,
+        }
 
-    # Step 1 — probe the chunk
-    r_chunk = probe(chunk)
-    if "error" in r_chunk:
-        return {"error": r_chunk["error"]}
-
-    knowledge_score = r_chunk["knowledge_score"]
-    novelty_score   = 100 - knowledge_score
-
-    # Step 1b — incremental novelty (cross-chunk context)
-    incremental_novelty = novelty_score
+    # Step 1b — Cross-chunk context tracking (experimental feature)
+    # Note: Full incremental novelty not yet implemented - requires session state integration
+    cross_chunk_novelty = None  # Reserved for future implementation
     if session is not None and len(r_chunk.get("surprises", [])) > 0:
-        # Feed the chunk's tokens through the session to update model state
-        # Then re-probe for what's still surprising
-        from .core import tokenize, compute_delta
-        chunk_ids = tokenize(chunk)
-        # After feeding, compute what remains novel given the session state
-        incremental_novelty = novelty_score  # simplified for now
+        # TODO: Full incremental novelty implementation
+        # Would require: feed tokens through session, re-probe for remaining surprises
+        pass
 
     # Step 2 — probe the query (how much does the model know the answer?)
     query_knowledge_score = query_knowledge
-    if query_knowledge_score is None and query:
+    if query_knowledge_score is None and query and probe_available and probe is not None:
         r_query = probe(query)
+        # Handle probe errors gracefully
         if "error" not in r_query:
             query_knowledge_score = r_query["knowledge_score"]
-    query_ignorance = 100 - (query_knowledge_score or 0)
+        # else: query_knowledge_score stays None
+    
+    # Initialize query_ignorance safely - defaults to 0 if probing unavailable
+    query_ignorance = 100 - (query_knowledge_score or 0) if query_knowledge_score is not None else 0
 
     # Step 3 — relevance via cosine similarity
     RELEVANCE_CUTOFF = 0.30
@@ -186,8 +263,11 @@ def score_chunk(
             else:
                 relevance_score = 0
         except Exception as e:
-            print(f"  [warn] embedding failed: {e} — relevance set to 0")
+            # Suppress noisy warnings in batch contexts - only log if verbose
+            if verbose:
+                print(f"  [warn] embedding failed: {e} — relevance set to 0")
             relevance_score = 0
+            embedding_available = False
 
     # Step 4 — weighted combination
     if query:
@@ -205,10 +285,10 @@ def score_chunk(
     result = {
         "rag_score"            : rag_score,
         "novelty_score"        : novelty_score,
-        "incremental_novelty"  : incremental_novelty,
+        "incremental_novelty"  : novelty_score,  # Simplified - not fully implemented yet
         "relevance_score"      : relevance_score,
         "knowledge_score"      : knowledge_score,
-        "query_knowledge"      : query_knowledge_score or 0,
+        "query_knowledge"      : query_knowledge_score if query_knowledge_score is not None else 0,
         "query_ignorance"      : query_ignorance,
         "verdict"              : verdict,
         "recommendation"       : recommendation,
@@ -217,11 +297,22 @@ def score_chunk(
         "token_count"          : r_chunk["token_count"],
         "surprise_count"       : r_chunk["surprise_count"],
         "cached"               : False,
+        # Metadata
+        "scoring_mode"         : scoring_mode,
+        "probe_available"      : probe_available,
+        "embedding_available"  : embedding_available,
+        "provider"             : caps.get("provider", "unknown"),
+        "weights_used"         : w,
     }
+    
+    # Only include cross_chunk_novelty if implemented
+    if cross_chunk_novelty is not None:
+        result["cross_chunk_novelty"] = cross_chunk_novelty
 
     # Cache the result (only if not using session)
+    # Use normalized weights as cache key to avoid collisions
     if use_cache and session is None:
-        cache.set_cached_score(chunk, query, weights, result)
+        cache.set_cached_score(chunk, query, w, result)
 
     if verbose:
         _print_chunk_report(result, query, w)
@@ -260,10 +351,12 @@ def score_chunks(
 
     # Pre-compute query knowledge once for all chunks
     query_knowledge = None
-    if query:
+    if query and probe is not None:
         r_query = probe(query)
+        # Handle probe errors gracefully
         if "error" not in r_query:
             query_knowledge = r_query["knowledge_score"]
+        # If query probing fails, continue with query_knowledge=None
 
     results = []
     total   = len(chunks)
@@ -292,13 +385,16 @@ def score_chunks(
         # Diversity dedup: skip if too similar to already-selected chunks
         if chunk_embeddings is not None and selected_embeddings:
             vec = chunk_embeddings[i]
-            if any(
-                _cosine_similarity(vec, sel) > diversity_threshold
-                for sel in selected_embeddings
-            ):
-                r["rag_score"] = 0       # mark as duplicate
-                r["verdict"]   = "skip"
-                r["recommendation"] = "Duplicate content — already covered."
+            # Skip zero vectors (embedding failures) in similarity computation
+            if np.linalg.norm(vec) > 1e-6:  # Not a zero vector
+                if any(
+                    np.linalg.norm(sel) > 1e-6 and  # Also check selected vector is not zero
+                    _cosine_similarity(vec, sel) > diversity_threshold
+                    for sel in selected_embeddings
+                ):
+                    r["rag_score"] = 0       # mark as duplicate
+                    r["verdict"]   = "skip"
+                    r["recommendation"] = "Duplicate content — already covered."
 
         results.append(r)
 
@@ -344,21 +440,36 @@ def score_chunks_batch(
     if not chunks:
         return []
 
-    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    # Validate and normalize weights
+    w, weights_valid = _validate_and_normalize_weights(weights)
+    
     total = len(chunks)
 
     print(f"\n[pymrsf.rag] Batch scoring {total} chunks...")
 
+    # Check if probing is available
+    probe_available = probe is not None
+    
     # Batch probe all chunks (this still runs sequentially, but avoids probe overhead)
     chunk_results = []
-    for i, chunk in enumerate(chunks):
-        print(f"  probing chunk {i+1}/{total}...", end="\r")
-        chunk_results.append(probe(chunk))
+    if probe_available:
+        for i, chunk in enumerate(chunks):
+            print(f"  probing chunk {i+1}/{total}...", end="\r")
+            r = probe(chunk)
+            chunk_results.append(r)
+    else:
+        # Fallback: no probing available
+        for chunk in chunks:
+            chunk_results.append({
+                "token_count": len(chunk.split()),
+                "surprise_count": 0,
+            })
 
     # Probe query once
     query_knowledge = None
-    if query:
+    if query and probe_available:
         r_query = probe(query)
+        # Handle probe errors gracefully
         if "error" not in r_query:
             query_knowledge = r_query["knowledge_score"]
 
@@ -368,31 +479,35 @@ def score_chunks_batch(
         try:
             q_vec = embed(query)
         except Exception:
-            pass
+            pass  # Suppress warning in batch mode
 
     chunk_embeddings = []
     for i, chunk in enumerate(chunks):
         try:
             chunk_embeddings.append(embed(chunk))
         except Exception:
-            chunk_embeddings.append(np.zeros(768))
+            # Mark embedding failures explicitly instead of using zero vectors
+            chunk_embeddings.append(None)
 
     print(f"  computing scores...           \r")
 
     results = []
-    query_ignorance = 100 - (query_knowledge or 0)
+    query_ignorance = 100 - (query_knowledge or 0) if query_knowledge is not None else 0
 
     for i, (r_chunk, c_vec) in enumerate(zip(chunk_results, chunk_embeddings)):
+        # Don't skip on probe errors - use fallback scoring
         if "error" in r_chunk:
-            continue
-
-        knowledge_score = r_chunk["knowledge_score"]
-        novelty_score   = 100 - knowledge_score
+            # Fallback to basic scoring
+            knowledge_score = 0
+            novelty_score = 100
+        else:
+            knowledge_score = r_chunk.get("knowledge_score", 0)
+            novelty_score = 100 - knowledge_score
 
         # Relevance
         RELEVANCE_CUTOFF = 0.30
         relevance_score = 0
-        if query and q_vec is not None:
+        if query and q_vec is not None and c_vec is not None:
             cosine = _cosine_similarity(q_vec, c_vec)
             if cosine >= RELEVANCE_CUTOFF:
                 rescaled = (cosine - RELEVANCE_CUTOFF) / (1.0 - RELEVANCE_CUTOFF)
@@ -413,18 +528,21 @@ def score_chunks_batch(
         results.append({
             "rag_score"           : rag_score,
             "novelty_score"       : novelty_score,
-            "incremental_novelty" : novelty_score,
+            "incremental_novelty" : novelty_score,  # Simplified - not fully implemented yet
             "relevance_score"     : relevance_score,
             "knowledge_score"     : knowledge_score,
-            "query_knowledge"     : query_knowledge or 0,
+            "query_knowledge"     : query_knowledge if query_knowledge is not None else 0,
             "query_ignorance"     : query_ignorance,
             "verdict"             : verdict,
             "recommendation"      : recommendation,
             "chunk"               : chunks[i],
             "chunk_preview"       : chunks[i][:80] + ("..." if len(chunks[i]) > 80 else ""),
-            "token_count"         : r_chunk["token_count"],
-            "surprise_count"      : r_chunk["surprise_count"],
+            "token_count"         : r_chunk.get("token_count", len(chunks[i].split())),
+            "surprise_count"      : r_chunk.get("surprise_count", 0),
             "original_index"      : i,
+            "scoring_mode"        : "full" if probe_available and "error" not in r_chunk else "relevance_only",
+            "probe_available"     : probe_available,
+            "embedding_available" : c_vec is not None,
         })
 
     # Diversity dedup pass
@@ -433,15 +551,18 @@ def score_chunks_batch(
         for r in sorted(results, key=lambda x: x["rag_score"], reverse=True):
             idx = r["original_index"]
             vec = chunk_embeddings[idx] if idx < len(chunk_embeddings) else None
-            if vec is not None and any(
-                _cosine_similarity(vec, sel) > diversity_threshold
-                for sel in selected
-            ):
-                r["rag_score"] = 0
-                r["verdict"]   = "skip"
-                r["recommendation"] = "Duplicate content — already covered."
-            else:
-                selected.append(vec)
+            # Skip None vectors (embedding failures) in similarity computation
+            if vec is not None and np.linalg.norm(vec) > 1e-6:
+                if any(
+                    sel is not None and np.linalg.norm(sel) > 1e-6 and
+                    _cosine_similarity(vec, sel) > diversity_threshold
+                    for sel in selected
+                ):
+                    r["rag_score"] = 0
+                    r["verdict"]   = "skip"
+                    r["recommendation"] = "Duplicate content — already covered."
+                elif r["rag_score"] >= 40:  # Only track useful chunks
+                    selected.append(vec)
 
     # Sort by rag_score
     results.sort(key=lambda x: x.get("rag_score", 0), reverse=True)
@@ -629,7 +750,7 @@ async def score_chunks_async(
     
     # Pre-compute query knowledge once
     query_knowledge = None
-    if query:
+    if query and probe is not None:
         loop = asyncio.get_event_loop()
         r_query = await loop.run_in_executor(None, probe, query)
         if "error" not in r_query:
@@ -670,21 +791,25 @@ async def score_chunks_async(
                     cache.set_cached_embedding(chunk, emb)
                     chunk_embeddings.append(emb)
                 except Exception:
-                    chunk_embeddings.append(np.zeros(768))
+                    # Mark embedding failures explicitly
+                    chunk_embeddings.append(None)
         
         selected_embeddings = []
         for r in sorted(results, key=lambda x: x["rag_score"], reverse=True):
             idx = r["original_index"]
             vec = chunk_embeddings[idx] if idx < len(chunk_embeddings) else None
-            if vec is not None and any(
-                _cosine_similarity(vec, sel) > diversity_threshold
-                for sel in selected_embeddings
-            ):
-                r["rag_score"] = 0
-                r["verdict"] = "skip"
-                r["recommendation"] = "Duplicate content — already covered."
-            elif r["rag_score"] >= 40:
-                selected_embeddings.append(vec)
+            # Skip None vectors (embedding failures) in similarity computation
+            if vec is not None and np.linalg.norm(vec) > 1e-6:
+                if any(
+                    sel is not None and np.linalg.norm(sel) > 1e-6 and
+                    _cosine_similarity(vec, sel) > diversity_threshold
+                    for sel in selected_embeddings
+                ):
+                    r["rag_score"] = 0
+                    r["verdict"] = "skip"
+                    r["recommendation"] = "Duplicate content — already covered."
+                elif r["rag_score"] >= 40:
+                    selected_embeddings.append(vec)
     
     # Sort by rag_score
     results.sort(key=lambda x: x.get("rag_score", 0), reverse=True)
