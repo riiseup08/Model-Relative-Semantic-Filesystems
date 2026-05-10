@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pymrsf"
-version = "0.5.0"
+version = "0.6.0rc1"
 description = "Novelty-Aware RAG scoring — Filter chunks by information gain, not just relevance"
 readme = "README.md"
 license = {text = "MIT"}
@@ -53,10 +53,10 @@ all = ["llama-cpp-python>=0.2.50,<0.3.0", "openai>=1.0.0", "anthropic>=0.18.0"]
 pymrsf = "pymrsf.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/riiseup08/mrsf"
-Repository = "https://github.com/riiseup08/mrsf"
-Documentation = "https://github.com/riiseup08/mrsf#readme"
-Changelog = "https://github.com/riiseup08/mrsf/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems"
+Repository = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems"
+Documentation = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems#readme"
+Changelog = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/CHANGELOG.md"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -79,8 +79,13 @@ quote-style = "double"
 
 [tool.hatch.build.targets.wheel]
 packages = ["pymrsf"]
+
 [tool.hatch.build]
 exclude = [
+    ".claude/",
+    ".coverage",
+    ".github/",
+    ".hypothesis/",
     "*.db",
     "*.faiss",
     "*.faiss.meta",
@@ -88,9 +93,17 @@ exclude = [
     "*.log",
     "*.csv",
     "*.gguf",
-    "models/",
     "canterbury/",
     "dist/",
+    "docs/",
+    "example_*.py",
+    "mkdocs.yml",
+    "models/",
+    "PERFORMANCE.md",
+    "PYPI_PUBLISH_GUIDE.md",
+    "REFACTOR_SUMMARY.md",
+    "site/",
+    "tests/",
     "venv/",
     "__pycache__/",
 ]

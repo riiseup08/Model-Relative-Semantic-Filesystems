@@ -2,7 +2,7 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/riiseup08/mrsf/actions/workflows/ci.yml/badge.svg)](https://github.com/riiseup08/mrsf/actions/workflows/ci.yml)
+[![CI](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/actions/workflows/ci.yml/badge.svg)](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/actions/workflows/ci.yml)
 [![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen)]()
 
 **Score RAG chunks by information gain — not just relevance.**
@@ -140,7 +140,7 @@ PYMRSF_EMBED_TIMEOUT=30
 - `PYMRSF_ALLOW_PROVIDER_FALLBACK` — when `true`, embed failures log a warning and continue instead of raising. Off by default (fail-fast).
 - `pymrsf.configure_logging("WARNING")` — pymrsf ships with a `NullHandler` so `import pymrsf` is silent until you opt in.
 
-See [ENV_CONFIG.md](ENV_CONFIG.md) for all supported variables.
+See [ENV_CONFIG.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/ENV_CONFIG.md) for all supported variables.
 
 ---
 
@@ -176,14 +176,14 @@ results = mrsf_read("famous French landmark", top_k=1)
 
 ## Additional documentation
 
-- [PROVIDER_SUPPORT.md](PROVIDER_SUPPORT.md) — full capability matrix with programmatic checks
-- [ENV_CONFIG.md](ENV_CONFIG.md) — all environment variables
-- [docs/CONCURRENCY.md](docs/CONCURRENCY.md) — threading and process-safety model
-- [CHANGELOG.md](CHANGELOG.md) — version history
+- [PROVIDER_SUPPORT.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/PROVIDER_SUPPORT.md) — full capability matrix with programmatic checks
+- [ENV_CONFIG.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/ENV_CONFIG.md) — all environment variables
+- [docs/CONCURRENCY.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/docs/CONCURRENCY.md) — threading and process-safety model
+- [CHANGELOG.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/CHANGELOG.md) — version history
 
 ## Paper
 
-The technical approach is described in the MRSF paper (link forthcoming). For now, see [CHANGELOG.md](CHANGELOG.md) for the research lineage and [the experimental module](pymrsf/experimental/) for the delta-compression implementation.
+The technical approach is described in the MRSF paper (link forthcoming). For now, see [CHANGELOG.md](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/CHANGELOG.md) for the research lineage and [the experimental module](https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/tree/main/pymrsf/experimental) for the delta-compression implementation.
 
 ## License
 
