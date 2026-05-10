@@ -129,19 +129,22 @@ def smart_chunk(
     except Exception:
         return _sentence_fallback(text, max_chunk_len)
 
-    # Build char offsets by progressively detokenizing prefixes
-    # This is approximate — we walk the text matching detokenized substrings
-    char_boundaries: list[int] = []
-    char_pos = 0
-    for bp in boundary_positions:
-        if bp >= len(token_ids):
-            continue
+    # Build cumulative char offsets in O(n) by detokenizing one token at a time.
+    # boundary_positions are sorted ascending, so we walk token_ids once.
+    boundary_set = set(boundary_positions)
+    cum_len = 0
+    cum_chars: list[int] = [0]  # cum_chars[i] = char offset just before token i
+    for tid in token_ids:
         try:
-            prefix = detokenize(token_ids[:bp])
-            char_pos = len(prefix)
-            char_boundaries.append(char_pos)
+            cum_len += len(detokenize([tid]))
         except Exception:
             pass
+        cum_chars.append(cum_len)
+
+    char_boundaries: list[int] = []
+    for bp in boundary_positions:
+        if bp < len(cum_chars):
+            char_boundaries.append(cum_chars[bp])
 
     if not char_boundaries:
         return _sentence_fallback(text, max_chunk_len)
