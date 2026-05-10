@@ -28,6 +28,14 @@ import threading
 import numpy as np
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 
+def _cfg():
+    """Return the current Config, falling back to env vars if pymrsf isn't fully initialised yet."""
+    try:
+        from pymrsf import _config
+        return _config
+    except ImportError:
+        return None
+
 _logger = logging.getLogger("pymrsf.embeddings")
 
 
@@ -78,9 +86,10 @@ _embed_dim_lock = threading.Lock()
 )
 def _embed_with_ollama(text: str) -> np.ndarray:
     import requests
-    base    = os.getenv("PYMRSF_OLLAMA_BASE", OLLAMA_BASE)
-    model   = os.getenv("PYMRSF_EMBED_MODEL", EMBED_MODEL)
-    timeout = int(os.getenv("PYMRSF_EMBED_TIMEOUT", str(EMBED_TIMEOUT)))
+    cfg     = _cfg()
+    base    = (cfg.ollama_base   if cfg else None) or os.getenv("PYMRSF_OLLAMA_BASE", OLLAMA_BASE)
+    model   = (cfg.embed_model   if cfg else None) or os.getenv("PYMRSF_EMBED_MODEL", EMBED_MODEL)
+    timeout = (cfg.embed_timeout if cfg else None) or int(os.getenv("PYMRSF_EMBED_TIMEOUT", str(EMBED_TIMEOUT)))
     r = requests.post(
         f"{base}/api/embed",
         json={"model": model, "input": text},
@@ -102,7 +111,8 @@ def _embed_with_openai(text: str) -> np.ndarray:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OpenAI embeddings require OPENAI_API_KEY environment variable.")
-    model = os.getenv("PYMRSF_EMBED_MODEL", "text-embedding-ada-002")
+    cfg   = _cfg()
+    model = (cfg.embed_model if cfg else None) or os.getenv("PYMRSF_EMBED_MODEL", "text-embedding-ada-002")
     client = OpenAI(api_key=api_key)
     r = client.embeddings.create(input=text, model=model)
     return np.array(r.data[0].embedding, dtype="float32")
@@ -154,7 +164,8 @@ def embed(text: str) -> np.ndarray:
     Raises:
         RuntimeError: If the configured provider fails and fallback is disabled.
     """
-    provider = os.getenv("PYMRSF_PROVIDER", PROVIDER).lower()
+    cfg = _cfg()
+    provider = ((cfg.provider if cfg else None) or os.getenv("PYMRSF_PROVIDER", PROVIDER)).lower()
     allow_fallback = os.getenv("PYMRSF_ALLOW_PROVIDER_FALLBACK", "false").lower() == "true"
 
     if provider == "openai":

@@ -69,6 +69,13 @@ class Config:
 
     Reads defaults from environment variables so existing .env setups
     continue to work. Override at runtime with configure().
+
+    Live-reconfigurable fields (take effect on next call):
+        provider, ollama_base, embed_model, embed_timeout,
+        default_relevance_cutoff, default_min_rag_score, default_diversity_threshold
+
+    Import-time only fields (model already loaded; changing has no effect):
+        model_path, n_ctx, n_gpu_layers, logit_precision
     """
     provider: str = field(default_factory=lambda: os.getenv("PYMRSF_PROVIDER", "local"))
     model_path: str = field(default_factory=lambda: os.getenv("PYMRSF_MODEL_PATH", "./models/mistral-7b-v0.1.Q4_K_M.gguf"))
