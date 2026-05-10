@@ -4,74 +4,26 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-84%20passing-brightgreen)]()
 
-**Stop wasting context window on information your LLM already knows.**
+**Score RAG chunks by information gain — not just relevance.**
 
-`pymrsf` scores RAG chunks by measuring **information gain** — not just relevance. It uses the
-model's own predictive surprise to detect which chunks contain genuinely new information.
+Vector databases and semantic chunkers retrieve by relevance (cosine similarity). A chunk can be highly relevant yet contain only facts the model already memorized during training — wasted context window. pymrsf uses the model's own predictive surprise to detect which chunks contain genuinely *new* information.
+
+- **Novelty**: Does the model already know this? (surprise-based)
+- **Relevance**: Is this related to the query? (cosine similarity)
+- **Query Ignorance**: Does the model even know the answer? (probe-based gate)
+- **Diversity**: Does a better chunk already cover this? (dedup post-filter)
 
 ---
 
-## Quick Start
+## Quick install
 
 ```bash
+# Start fast with an API provider (no 4 GB model download)
 pip install pymrsf[openai]
 export OPENAI_API_KEY='sk-...'
-```
 
-```python
-import pymrsf
-
-chunks = [
-    "Backpropagation computes gradients using the chain rule.",
-    "Neural networks are inspired by the human brain.",
-    "The sky is blue because of Rayleigh scattering.",
-]
-
-# Filter chunks to the ones that matter for this query
-useful = pymrsf.filter_chunks(chunks, query="How does backpropagation work?", min_rag_score=50)
-
-# Surprise-guided chunking — split at natural knowledge boundaries
-from pymrsf import smart_chunk
-pieces = smart_chunk(long_document)   # requires local provider
-
-# Probe what the model already knows
-from pymrsf import probe
-result = probe("To be or not to be, that is the question.")
-print(result["knowledge_score"])  # 92/100 — Shakespeare is memorized
-```
-
----
-
-## Why pymrsf?
-
-Standard RAG retrieves by *relevance* (cosine similarity). A chunk can be highly relevant yet
-contain *only facts the model already memorized during training* — wasted context window.
-
-`pymrsf` adds two orthogonal signals:
-
-| Factor | What It Measures | Default Weight |
-|--------|-----------------|----------------|
-| **Novelty** | New information vs. model's prior knowledge | 40% |
-| **Relevance** | Query–chunk semantic similarity | 40% |
-| **Query Ignorance** | Does the model not know the answer? | 20% |
-| **Diversity** | Dedup: does a better chunk cover this already? | post-filter |
-
----
-
-## Installation
-
-```bash
-# OpenAI API (recommended to start — no 4 GB model download)
-pip install pymrsf[openai]
-
-# Anthropic API
-pip install pymrsf[anthropic]
-
-# Local model — full features including probing and smart_chunk
+# Or for full features (probing, smart_chunk, round-trip):
 pip install pymrsf[local]
-
-# All providers
-pip install pymrsf[all]
 ```
 
 All providers require [Ollama](https://ollama.ai/) for embeddings:
@@ -82,30 +34,28 @@ ollama pull nomic-embed-text
 
 ---
 
-## Core API
-
-### RAG scoring
+## 30-second example — score and filter chunks
 
 ```python
-from pymrsf import score_chunk, score_chunks, filter_chunks, smart_filter
+from pymrsf import score_chunk, filter_chunks
 
-# Single chunk
-result = score_chunk("Backpropagation uses the chain rule.", query="How does backprop work?")
+chunks = [
+    "Backpropagation computes gradients using the chain rule.",
+    "Neural networks are inspired by the human brain.",
+    "The sky is blue because of Rayleigh scattering.",
+]
+
+# Score a single chunk
+result = score_chunk(chunks[0], query="How does backpropagation work?")
 print(result["rag_score"])   # 0–100
 print(result["verdict"])     # "excellent" / "good" / "moderate" / "weak" / "skip"
 
-# Many chunks at once
-results = score_chunks(chunks, query="...")
-
-# Filter to the best
-kept = filter_chunks(chunks, query="...", min_rag_score=50, top_k=5, diversity_threshold=0.85)
-
-# Adaptive budget — returns 0 chunks when the model already knows the answer
-smart = smart_filter(chunks, query="...")
-print(smart["budget_applied"])   # "high" / "medium" / "low" / "none"
+# Filter to only the useful chunks
+useful = filter_chunks(chunks, query="How does backpropagation work?", min_rag_score=50)
+# useful ≈ ["Backpropagation computes gradients..."]
 ```
 
-### Async support
+With **async** for production pipelines:
 
 ```python
 import asyncio
@@ -114,62 +64,62 @@ from pymrsf import filter_chunks_async
 useful = asyncio.run(filter_chunks_async(chunks, query="...", min_rag_score=50))
 ```
 
-### Configurable thresholds and weights
+---
 
-```python
-result = score_chunk(
-    chunk, query="...",
-    weights={"novelty": 0.5, "relevance": 0.3, "query_ignorance": 0.2},
-    relevance_cutoff=0.4,
-    thresholds=[
-        {"label": "excellent", "min": 75},
-        {"label": "good",      "min": 55},
-        {"label": "weak",      "min": 30},
-        {"label": "skip",      "min":  0},
-    ],
-)
-```
+## 60-second example — surprise-guided chunking
 
-### Surprise-guided chunking (local provider)
+Instead of splitting at fixed sizes or sentence boundaries, `smart_chunk` uses the model's surprise signal to find natural knowledge transitions:
 
 ```python
 from pymrsf import smart_chunk
 
-# Chunk boundaries placed at natural knowledge transitions, not fixed sizes
+long_article = """
+Quantum computing leverages superposition and entanglement to perform
+calculations that would be infeasible for classical computers. Unlike
+classical bits, qubits can exist in multiple states simultaneously.
+...
+Machine learning models learn patterns from data through iterative
+optimization of a loss function. Neural networks, in particular,
+use backpropagation to adjust millions of parameters.
+...
+"""
+
+# Chunks split at the boundary between "quantum computing" and "ML" —
+# where the model's surprise signal drops after absorbing one topic
 pieces = smart_chunk(long_article, min_chunk_len=200, max_chunk_len=800)
 ```
 
-### Knowledge probing
-
-```python
-from pymrsf import probe, probe_compare
-
-result = probe("The capital of France is Paris.")
-print(result["knowledge_score"])   # 95/100
-
-# Compare two phrasings
-diff = probe_compare("Paris is in France.", "Paris is the capital of Germany.")
-```
+**Requires the local provider.** Falls back to sentence splitting for API providers.
 
 ---
 
-## Provider comparison
+## Provider matrix
 
-| Feature | Local | OpenAI | Anthropic |
+This is the most important table in this README — it tells you which features work with which provider.
+
+| Feature | local | openai | anthropic |
 |---------|-------|--------|-----------|
-| RAG scoring (novelty + relevance + ignorance) | Full | Approx | Relevance only |
-| Knowledge probing | Full | Approx | — |
-| `smart_chunk` (surprise-guided) | ✅ | fallback | fallback |
-| Async support | ✅ | ✅ | ✅ |
-| Score caching | ✅ | ✅ | ✅ |
+| **RAG scoring** | Full (novelty + relevance + ignorance) | Relevance-only | Relevance-only |
+| **Knowledge probing** | ✅ Full | ⚠️ Limited | ❌ |
+| **smart_chunk** (surprise-guided) | ✅ Yes | Fallback to sentence | Fallback to sentence |
+| **Delta compression / round-trip** | ✅ Yes | ❌ | ❌ |
+| **Model session** (KV-cache) | ✅ Yes | ❌ | ❌ |
+| **Async scoring** | ✅ | ✅ | ✅ |
+| **Score caching** | ✅ | ✅ | ✅ |
+
+**Key takeaway:** probing, smart_chunk, and the experimental round-trip storage all require the **local** provider (`pip install pymrsf[local]` + a GGUF model). If you only need relevance-based RAG scoring, OpenAI or Anthropic work fine.
 
 ---
 
-## Runtime configuration
+## Production configuration
 
 ```python
 import pymrsf
 
+# Enable pymrsf log output (silent by default)
+pymrsf.configure_logging("INFO")
+
+# Tweak runtime settings without touching env vars
 pymrsf.configure(
     provider="openai",
     embed_timeout=60,
@@ -177,26 +127,29 @@ pymrsf.configure(
 )
 ```
 
-Or via environment variables (`.env` file):
+Environment variables for container/CI environments:
 
 ```bash
 PYMRSF_PROVIDER=openai
 OPENAI_API_KEY=sk-...
-PYMRSF_EMBED_MODEL=nomic-embed-text
+PYMRSF_ALLOW_PROVIDER_FALLBACK=true   # silently fall back on embed failures
 PYMRSF_EMBED_TIMEOUT=30
 ```
 
+- `PYMRSF_ALLOW_PROVIDER_FALLBACK` — when `true`, embed failures log a warning and continue instead of raising. Off by default (fail-fast).
+- `pymrsf.configure_logging("WARNING")` — pymrsf ships with a `NullHandler` so `import pymrsf` is silent until you opt in.
+
+See [ENV_CONFIG.md](ENV_CONFIG.md) for all supported variables.
+
 ---
 
-## Experimental: MRSF storage backend
+## Experimental: MRSF delta-compression storage
 
-The delta-compression storage system is a research backend — it stores only
-"surprise" tokens (40–60% compression) and reconstructs text via O(n) model inference.
+The round-trip storage backend stores only "surprise" tokens (40–60% compression) and reconstructs text via O(n) model inference. Import from `pymrsf.experimental` to signal the research-grade scope:
 
 ```python
 from pymrsf.experimental import mrsf_write, mrsf_read, save_index
 
-# Requires local provider
 doc = mrsf_write("The Eiffel Tower was built in 1889.")
 print(doc["compression"])   # 0.47 — 47% of tokens were predictable
 
@@ -204,9 +157,7 @@ save_index()
 results = mrsf_read("famous French landmark", top_k=1)
 ```
 
-These APIs are stable but may change between minor versions. Import from
-`pymrsf.experimental` to signal that dependency clearly; the top-level
-re-exports (`from pymrsf import mrsf_write`) continue to work.
+[Full experimental docs →](pymrsf/experimental/)
 
 ---
 
@@ -224,10 +175,14 @@ re-exports (`from pymrsf import mrsf_write`) continue to work.
 
 ## Additional documentation
 
-- [PROVIDER_SUPPORT.md](PROVIDER_SUPPORT.md) — full capability matrix
+- [PROVIDER_SUPPORT.md](PROVIDER_SUPPORT.md) — full capability matrix with programmatic checks
 - [ENV_CONFIG.md](ENV_CONFIG.md) — all environment variables
 - [docs/CONCURRENCY.md](docs/CONCURRENCY.md) — threading and process-safety model
 - [CHANGELOG.md](CHANGELOG.md) — version history
+
+## Paper
+
+The technical approach is described in the MRSF paper (link forthcoming). For now, see [CHANGELOG.md](CHANGELOG.md) for the research lineage and [the experimental module](pymrsf/experimental/) for the delta-compression implementation.
 
 ## License
 
