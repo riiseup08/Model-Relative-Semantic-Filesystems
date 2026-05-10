@@ -10,7 +10,32 @@
       "Bash(pip install *)",
       "Bash(python -m mkdocs build)",
       "Bash(ruff check *)",
-      "PowerShell(ruff check *)"
+      "PowerShell(ruff check *)",
+      "Bash(gh auth *)",
+      "Bash(where gh *)",
+      "Bash(git remote *)",
+      "Bash(python -m build)",
+      "Bash(git checkout *)",
+      "Bash(git merge *)",
+      "Bash(git stash *)",
+      "Bash(git push *)",
+      "Bash(git fetch *)",
+      "Bash(git pull *)",
+      "Bash(git tag *)",
+      "Bash(curl -s \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs?event=push&per_page=5\")",
+      "Bash(python3 -c ' *)",
+      "PowerShell(r[name] *)",
+      "Bash(python3 *)",
+      "PowerShell(python C:\\\\Users\\\\pokam\\\\mrsf\\\\.claude\\\\check_workflow.py)",
+      "Bash(python -c ' *)",
+      "Bash(curl -s \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs/25630884534/jobs\")",
+      "Bash(curl -sL \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs/25630884534/logs\")",
+      "Bash(curl -s \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs?event=push&per_page=10\")",
+      "Bash(curl -s \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs?per_page=10\")",
+      "Bash(curl -s \"https://api.github.com/repos/riiseup08/Model-Relative-Semantic-Filesystems/actions/runs/25631093151/jobs\")",
+      "PowerShell(python -m venv C:\\\\Users\\\\pokam\\\\mrsf\\\\.claude\\\\test_venv --clear 2>&1)",
+      "PowerShell(& C:\\\\Users\\\\pokam\\\\mrsf\\\\.claude\\\\test_venv\\\\Scripts\\\\python -c \"import pymrsf; print\\(f'Version: {pymrsf.__version__}'\\); print\\(f'Provider: {pymrsf.provider_capabilities\\(\\)}'\\); print\\('Import OK'\\)\" 2>&1)",
+      "Bash(git commit *)"
     ]
   }
 }
