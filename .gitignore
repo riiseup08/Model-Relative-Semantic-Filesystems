@@ -44,3 +44,18 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch files in repo root
+test_*.py
+verify_*.py
+final_test.py
+update_version.py
+demo_novelty.py
+rag_experiment.py
+mrsf_benchmark_full.py
+c:Userspokammrsf*
+BASELINE.md
+VERIFICATION_REPORT.md
+TEST_RESULTS.md
+mrsf_benchmark.log
+mrsf_results_full.csv
