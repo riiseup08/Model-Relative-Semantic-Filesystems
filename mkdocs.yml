@@ -1,0 +1,45 @@
+site_name: pymrsf
+site_description: Novelty-Aware RAG scoring — Filter chunks by information gain, not just relevance
+repo_url: https://github.com/riiseup08/mrsf
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    scheme: default
+    primary: indigo
+  features:
+    - content.code.copy
+    - navigation.expand
+    - navigation.top
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          paths: [.]
+          options:
+            show_source: true
+            show_root_heading: true
+            show_if_no_docstring: false
+            heading_level: 3
+            docstring_style: google
+
+markdown_extensions:
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.tabbed
+  - admonition
+  - pymdownx.details
+
+nav:
+  - Home: index.md
+  - API Reference: api.md
+  - Cookbook:
+    - cookbook/01_rag_pipeline.md
+    - cookbook/02_novelty_detection.md
+    - cookbook/03_chunk_quality_audit.md
+  - Concurrency: CONCURRENCY.md
+  - Changelog: CHANGELOG.md

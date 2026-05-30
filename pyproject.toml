@@ -1,20 +1,18 @@
 [build-system]
-requires = ["setuptools>=61.0", "wheel"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [project]
 name = "pymrsf"
-version = "0.5.0"
-description = "Model-Relative Semantic Filtering — Novelty-aware RAG chunk scoring using language model surprise signals"
+version = "0.6.0"
+description = "Novelty-Aware RAG scoring — Filter chunks by information gain, not just relevance"
 readme = "README.md"
-requires-python = ">=3.10"
 license = {text = "MIT"}
-authors = [
-    {name = "pymrsf contributors"}
-]
-keywords = ["rag", "retrieval", "semantic", "nlp", "llm", "embeddings", "novelty", "surprise"]
+authors = [{name = "Eric Monthe"}]
+requires-python = ">=3.10"
+keywords = ["rag", "llm", "novelty", "embeddings", "retrieval", "semantic", "information-gain"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
@@ -25,79 +23,88 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
-
 dependencies = [
+    "httpx>=0.25.0",
     "numpy>=1.24.0",
+    "faiss-cpu>=1.7.4",
+    "msgpack>=1.0.0",
     "python-dotenv>=1.0.0",
-    "tenacity>=8.2.0",
+    "requests>=2.31.0",
+    "tiktoken>=0.5.0",
+    "tenacity>=8.0.0,<10.0.0",
 ]
 
 [project.optional-dependencies]
-local = [
-    "llama-cpp-python>=0.2.0",
-]
-openai = [
-    "openai>=1.0.0",
-    "tiktoken>=0.5.0",
-]
-anthropic = [
-    "anthropic>=0.25.0",
-]
-all = [
-    "llama-cpp-python>=0.2.0",
-    "openai>=1.0.0",
-    "tiktoken>=0.5.0",
-    "anthropic>=0.25.0",
-]
 dev = [
-    "pytest>=7.4.0",
+    "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
-    "pytest-cov>=4.1.0",
-    "black>=23.0.0",
-    "flake8>=6.0.0",
-    "mypy>=1.5.0",
-    "isort>=5.12.0",
+    "pytest-cov>=4.0.0",
+    "hypothesis>=6.0.0,<7.0.0",
+    "ruff>=0.1.0",
+    "mkdocs>=1.5.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocstrings[python]>=2.0.0",
 ]
-
-[project.urls]
-Homepage = "https://github.com/yourusername/pymrsf"
-Documentation = "https://github.com/yourusername/pymrsf#readme"
-Repository = "https://github.com/yourusername/pymrsf"
-Issues = "https://github.com/yourusername/pymrsf/issues"
+local = ["llama-cpp-python>=0.2.50,<0.3.0"]
+openai = ["openai>=1.0.0"]
+anthropic = ["anthropic>=0.18.0"]
+all = ["llama-cpp-python>=0.2.50,<0.3.0", "openai>=1.0.0", "anthropic>=0.18.0"]
 
 [project.scripts]
 pymrsf = "pymrsf.cli:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.setuptools.package-data]
-pymrsf = ["py.typed"]
-
-[tool.black]
-line-length = 100
-target-version = ['py310', 'py311', 'py312']
-include = '\.pyi?$'
-
-[tool.isort]
-profile = "black"
-line_length = 100
-
-[tool.mypy]
-python_version = "3.10"
-warn_return_any = true
-warn_unused_configs = true
-disallow_untyped_defs = false
-ignore_missing_imports = true
+[project.urls]
+Homepage = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems"
+Repository = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems"
+Documentation = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems#readme"
+Changelog = "https://github.com/riiseup08/Model-Relative-Semantic-Filesystems/blob/main/CHANGELOG.md"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
-python_files = ["test_*.py"]
-python_classes = ["Test*"]
-python_functions = ["test_*"]
-addopts = [
-    "--strict-markers",
-    "--strict-config",
-    "-ra",
-]
 asyncio_mode = "auto"
+markers = ["slow: marks tests as slow (deselect with -m 'not slow')"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["E402"]
+"pymrsf/experimental/storage.py" = ["E402"]
+"pymrsf/rag.py" = ["E402"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pymrsf"]
+
+[tool.hatch.build]
+exclude = [
+    ".claude/",
+    ".coverage",
+    ".github/",
+    ".hypothesis/",
+    "*.db",
+    "*.faiss",
+    "*.faiss.meta",
+    "*.tar.gz",
+    "*.log",
+    "*.csv",
+    "*.gguf",
+    "canterbury/",
+    "dist/",
+    "docs/",
+    "example_*.py",
+    "mkdocs.yml",
+    "models/",
+    "PERFORMANCE.md",
+    "PYPI_PUBLISH_GUIDE.md",
+    "REFACTOR_SUMMARY.md",
+    "site/",
+    "tests/",
+    "venv/",
+    "__pycache__/",
+]

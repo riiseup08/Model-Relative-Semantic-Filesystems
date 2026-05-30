@@ -1,215 +1,125 @@
 # Contributing to pymrsf
 
-Thank you for your interest in contributing to pymrsf! This document provides guidelines and instructions for contributing.
+Thanks for your interest! This document covers how to set up a development
+environment, run tests, and submit changes.
 
-## 🚀 Getting Started
+## Dev environment
 
-### Prerequisites
-- Python 3.10 or higher
-- Git
-- (Optional) A GGUF model file for testing local features
-
-### Development Setup
-
-1. **Fork and clone the repository**
-   ```bash
-   git clone https://github.com/yourusername/pymrsf.git
-   cd pymrsf
-   ```
-
-2. **Create a virtual environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
-
-3. **Install development dependencies**
-   ```bash
-   pip install -e ".[dev,all]"
-   ```
-
-4. **Set up your environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your settings
-   ```
-
-5. **Run tests to verify setup**
-   ```bash
-   pytest
-   ```
-
-## 🔧 Development Workflow
-
-### Code Style
-
-We use the following tools to maintain code quality:
-- **black** for code formatting
-- **isort** for import sorting
-- **flake8** for linting
-- **mypy** for type checking
-
-Format your code before committing:
 ```bash
-black src/ tests/
-isort src/ tests/
-flake8 src/ tests/
-mypy src/pymrsf
+# Clone the repo
+git clone https://github.com/riiseup08/mrsf.git
+cd mrsf
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # or venv\Scripts\activate on Windows
+
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# For local model testing (optional, requires a GGUF model):
+pip install -e ".[local]"
 ```
 
-Or install the git hook so this runs automatically on every commit:
+You also need [Ollama](https://ollama.ai/) running locally for embeddings:
+
 ```bash
-pip install pre-commit
-pre-commit install
+ollama pull nomic-embed-text
 ```
 
-### Running Tests
+## Running tests
 
 ```bash
-# Run all tests
-pytest
+# Run the full test suite (no local model required)
+pytest tests/ -v
+
+# Run fast tests only
+pytest tests/ -v -m "not slow"
 
 # Run with coverage
-pytest --cov=pymrsf --cov-report=html
+pytest tests/ --cov=pymrsf
 
-# Run specific test file
-pytest tests/test_fixes.py
-
-# Local-provider tests (tests/test_local.py) auto-skip unless a GGUF model is
-# present. Point them at one with: PYMRSF_TEST_MODEL=/path/to/model.gguf
-
-# Run with verbose output
-pytest -v
+# Run a specific test file
+pytest tests/test_core.py -v
 ```
 
-### Adding New Features
+The test suite is designed to pass **without a local GGUF model**. Tests that
+need a local model are skipped automatically.
 
-1. **Create a feature branch**
-   ```bash
-   git checkout -b feature/your-feature-name
-   ```
+## Code style
 
-2. **Write your code**
-   - Add your feature implementation
-   - Write tests for your feature
-   - Update documentation as needed
+We use [ruff](https://docs.astral.sh/ruff/) for linting and formatting:
 
-3. **Test your changes**
-   ```bash
-   pytest
-   black src/ tests/
-   flake8 src/ tests/
-   ```
+```bash
+# Lint
+ruff check pymrsf/
 
-4. **Commit your changes**
-   ```bash
-   git add .
-   git commit -m "Add: brief description of your feature"
-   ```
-
-5. **Push and create a pull request**
-   ```bash
-   git push origin feature/your-feature-name
-   ```
-
-## 📝 Commit Message Guidelines
-
-Use clear, descriptive commit messages:
-- `Add: new feature or functionality`
-- `Fix: bug fix`
-- `Update: changes to existing functionality`
-- `Docs: documentation updates`
-- `Test: adding or updating tests`
-- `Refactor: code refactoring`
-- `Style: formatting, missing semicolons, etc.`
-
-Example:
-```
-Add: async support for chunk scoring
-
-- Implement score_chunk_async function
-- Add asyncio tests
-- Update documentation with async examples
+# Format
+ruff format pymrsf/
 ```
 
-## 🐛 Reporting Bugs
+## Commit message convention
 
-When reporting bugs, please include:
-- **Description**: Clear description of the issue
-- **Steps to reproduce**: Minimal code example
-- **Expected behavior**: What you expected to happen
-- **Actual behavior**: What actually happened
-- **Environment**: Python version, OS, provider (local/openai/anthropic)
-- **Logs**: Relevant error messages or logs
+We use [Conventional Commits](https://www.conventionalcommits.org/):
 
-## 💡 Feature Requests
+```
+<type>: <short description>
 
-We welcome feature requests! Please:
-- Check existing issues first to avoid duplicates
-- Clearly describe the feature and its use case
-- Explain why it would be useful to the project
-- Consider whether it fits the project's scope
-
-## 🧪 Testing Guidelines
-
-- Write tests for all new features
-- Maintain or improve code coverage
-- Test both success and failure cases
-- Test with different providers (local, OpenAI, Anthropic)
-- Use fixtures for common test setup
-
-Example test structure:
-```python
-import pytest
-from pymrsf import score_chunk
-
-def test_score_chunk_basic():
-    """Test basic chunk scoring functionality."""
-    result = score_chunk("Test content", query="test query")
-    assert "rag_score" in result
-    assert 0 <= result["rag_score"] <= 100
-
-@pytest.mark.asyncio
-async def test_score_chunk_async():
-    """Test async chunk scoring."""
-    from pymrsf.rag import score_chunk_async
-    result = await score_chunk_async("Test", query="test")
-    assert result is not None
+<optional body>
 ```
 
-## 📚 Documentation
+Types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `ci`.
 
-- Update README.md for user-facing changes
-- Add docstrings to new functions and classes
-- Update .env.example for new configuration options
-- Add examples for new features
+Examples:
+```
+feat: add OpenAI provider support
+fix: correct O(n²) smart_chunk prefix detokenize
+docs: add provider matrix to README
+test: add hypothesis round-trip property tests
+```
 
-## 🔒 Security
+## Pull request process
 
-If you discover a security vulnerability:
-- **DO NOT** open a public issue
-- Email the maintainers directly
-- Provide details about the vulnerability
-- Allow time for a fix before public disclosure
+1. Open an issue first to discuss the change you want to make.
+2. Create a feature branch from `main`.
+3. Write tests for your change.
+4. Ensure all existing tests still pass.
+5. Run `ruff check` and `ruff format` on your changes.
+6. Open a PR against `main` with a clear title and description.
 
-## 📄 License
+## Project structure
 
-By contributing, you agree that your contributions will be licensed under the MIT License.
-
-## 🤝 Code of Conduct
-
-- Be respectful and inclusive
-- Provide constructive feedback
-- Focus on what is best for the community
-- Show empathy towards other contributors
-
-## ❓ Questions?
-
-If you have questions:
-- Check existing issues and discussions
-- Open a new issue with the "question" label
-- Reach out to the maintainers
-
----
-
-Thank you for contributing to pymrsf! 🎉
+```
+pymrsf/
+    __init__.py         # Public API exports and Config
+    core.py             # Provider backends and lazy model loading
+    rag.py              # RAG scoring (score_chunk, filter_chunks)
+    chunker.py          # Surprise-guided chunking (smart_chunk)
+    probe.py            # Knowledge probing (probe)
+    embeddings.py       # Embedding generation
+    cache.py            # LRU score and embedding caches
+    cli.py              # CLI entry point
+    experimental/       # Research-grade MRSF storage backend
+        __init__.py
+        storage.py      # Delta-compression write/read
+        inspect.py      # Delta inspection
+        benchmark.py    # Compression/latency benchmarks
+tests/
+    test_core.py
+    test_rag.py
+    test_probe.py
+    test_cache.py
+    test_config.py
+    test_async.py
+    test_integration.py
+    test_storage.py
+    test_cache_perf.py
+    test_chunker_perf.py
+    experimental/
+        test_roundtrip.py  # Hypothesis property tests
+docs/
+    CONCURRENCY.md
+    MIGRATION.md
+    api.md
+    cookbook/
+```
