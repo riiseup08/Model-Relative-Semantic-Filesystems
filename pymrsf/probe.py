@@ -31,9 +31,9 @@ Higher compression = model knows it better.
 import numpy as np
 
 from .core import (
-    MODEL_VERSION,
     detokenize,
     get_backend,
+    get_model_version,
     get_raw_lm,
     provider_capabilities,
     quantized_argmax,
@@ -143,7 +143,7 @@ def probe(text: str, verbose: bool = False) -> dict:
         "surprise_count" : len(surprises),
         "surprises"      : surprises,
         "heatmap"        : heatmap,
-        "model"          : MODEL_VERSION,
+        "model"          : get_model_version(),
     }
 
 
@@ -194,7 +194,7 @@ def _print_report(text, compression, score, label, description, surprises, heatm
     print("  PYMRSF KNOWLEDGE PROBE")
     print(f"{'═' * 65}")
     print(f"  Text    : {text[:70]}{'...' if len(text) > 70 else ''}")
-    print(f"  Model   : {MODEL_VERSION}")
+    print(f"  Model   : {get_model_version()}")
     print(f"{'─' * 65}")
     print(f"  Score   : {score}/100  [{bar}]")
     print(f"  Label   : {label.upper()}")

@@ -281,7 +281,11 @@ def mrsf_read(query: str, top_k: int = 1) -> list:
 
         m_ver, delta_blob, token_count = row
         if m_ver != MODEL_VERSION:
-            _logger.warning("Version mismatch: stored=%s | current=%s", m_ver, MODEL_VERSION)
+            raise ValueError(
+                f"Model version mismatch: stored record was created with '{m_ver}' "
+                f"but current model is '{MODEL_VERSION}'. "
+                "MRSF records are bound to the model version that created them (Property P1)."
+            )
 
         # Safely unpack msgpack
         delta_list = msgpack.unpackb(delta_blob, strict_map_key=False)

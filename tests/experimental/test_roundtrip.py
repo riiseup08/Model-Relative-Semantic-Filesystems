@@ -240,3 +240,41 @@ def test_rebuild_uses_stored_text(tmp_path):
         assert result["recovered"] == 1
         assert len(embed_calls) == 1
         assert embed_calls[0] == "alpha text"
+
+
+# ── Cross-model-version enforcement (Property P1) ──────────────────────────
+
+def test_cross_version_read_raises(tmp_path):
+    """
+    Property: records are bound to the model version that created them.
+    Reading under a different model version must raise ValueError.
+    """
+    import pymrsf.experimental.storage as s
+
+    patches = _patch_storage(tmp_path)
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        s._faiss_index = None
+        s._index_meta = None
+        s._tombstones = set()
+        s._conn = None
+        s._cur = None
+        s._rebuild_counter = 0
+
+        # Write under MODEL_VERSION "v0"
+        with patch("pymrsf.experimental.storage.MODEL_VERSION", "v0"):
+            result = s.mrsf_write("The Eiffel Tower was built in 1889.")
+            assert "error" not in result, result
+            doc_id = result["doc_id"]
+
+        # Read under MODEL_VERSION "v1" -> should raise ValueError
+        with patch("pymrsf.experimental.storage.MODEL_VERSION", "v1"):
+            with pytest.raises(ValueError, match="Model version mismatch"):
+                s.mrsf_read("famous landmark", top_k=5)
+
+        # Read under same MODEL_VERSION -> should NOT raise
+        with patch("pymrsf.experimental.storage.MODEL_VERSION", "v0"):
+            try:
+                results = s.mrsf_read("famous landmark", top_k=5)
+                assert isinstance(results, list)
+            except ValueError:
+                pytest.fail("Reading with matching model version should not raise ValueError")

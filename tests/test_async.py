@@ -19,7 +19,7 @@ def _make_caps(probe=False):
 async def test_basic_async_score():
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunk_async
         result = await score_chunk_async("some text chunk", query="what is this?")
     assert "rag_score" in result
@@ -32,7 +32,7 @@ async def test_async_matches_sync():
     """Async and sync should produce identical results when given same inputs."""
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunk, score_chunk_async
         sync_result = score_chunk("test chunk", query="test query", use_cache=False)
         async_result = await score_chunk_async("test chunk", query="test query", use_cache=False)
@@ -45,7 +45,7 @@ async def test_score_chunks_async_returns_ranked():
     chunks = ["chunk one", "chunk two", "chunk three"]
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunks_async
         results = await score_chunks_async(chunks, query="test query")
     assert len(results) == 3
@@ -68,7 +68,7 @@ async def test_incremental_async_runs_without_error():
     """incremental=True with probe unavailable should fall back gracefully."""
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps(probe=False)), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunks_async
         results = await score_chunks_async(
             ["chunk a", "chunk b"], query="query", incremental=True
@@ -82,7 +82,7 @@ async def test_diversity_dedup_async():
     identical = "This is the same text repeated exactly."
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunks_async
         results = await score_chunks_async(
             [identical, identical], query="something", diversity_threshold=0.85
@@ -97,7 +97,7 @@ async def test_filter_chunks_async_returns_strings():
     chunks = ["useful chunk", "another chunk"]
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import filter_chunks_async
         result = await filter_chunks_async(chunks, query="query", min_rag_score=0)
     assert isinstance(result, list)
@@ -109,7 +109,7 @@ async def test_filter_chunks_async_respects_min_score():
     chunks = ["chunk a", "chunk b"]
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import filter_chunks_async
         # min_rag_score=101 means nothing passes
         result = await filter_chunks_async(chunks, query="query", min_rag_score=101)
@@ -122,7 +122,7 @@ async def test_custom_thresholds_async():
     tiny_thresholds = [(50, "high", "High"), (0, "low", "Low")]
     with patch("pymrsf.rag.provider_capabilities", return_value=_make_caps()), \
          patch("pymrsf.rag.embed", return_value=FAKE_EMBED), \
-         patch("pymrsf.rag.probe", None):
+         patch("pymrsf.rag._get_probe", return_value=None):
         from pymrsf.rag import score_chunk_async
         result = await score_chunk_async(
             "text", query="q", thresholds=tiny_thresholds, use_cache=False

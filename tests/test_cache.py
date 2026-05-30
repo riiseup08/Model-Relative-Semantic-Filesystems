@@ -64,7 +64,7 @@ def test_cache_hit_on_same_chunk():
     from unittest.mock import patch as _patch
     with _patch("pymrsf.rag.provider_capabilities") as mock_caps, \
          _patch("pymrsf.rag.embed", return_value=[0.1] * 768), \
-         _patch("pymrsf.rag.probe", None):
+         _patch("pymrsf.rag._get_probe", return_value=None):
         mock_caps.return_value = {"supports_probe": False, "supports_embeddings": True,
                                   "supports_delta": False, "provider": "openai"}
         from pymrsf.rag import score_chunk

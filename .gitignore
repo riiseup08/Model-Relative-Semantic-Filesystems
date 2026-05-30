@@ -48,6 +48,16 @@ Thumbs.db
 # Scratch files in repo root
 test_*.py
 verify_*.py
+
+# Claude local settings (contains secrets)
+.claude/settings.local.json
+
+# Coverage reports
+.coverage
+htmlcov/
+
+# Test data
+data/
 final_test.py
 update_version.py
 demo_novelty.py

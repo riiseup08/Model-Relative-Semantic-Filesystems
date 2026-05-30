@@ -43,26 +43,27 @@ _logger = logging.getLogger("pymrsf.rag")
 from dataclasses import dataclass
 
 from . import cache
-from .core import MODEL_VERSION, PROVIDER, ModelSession, provider_capabilities
+from .core import ModelSession, get_model_version, get_provider, provider_capabilities
 from .embeddings import embed
 
-# Conditional import for probe (only available with certain providers)
-_probe_available = provider_capabilities().get("supports_probe", False)
-if _probe_available:
-    from .probe import probe
-else:
-    probe = None
+
+def _get_probe():
+    """Return probe function if current provider supports it, else None."""
+    if not provider_capabilities().get("supports_probe", False):
+        return None
+    from .probe import probe as _probe
+    return _probe
 
 
 # ── Cache context helpers ──────────────────────────────────────────────────────
 def _get_provider_for_cache():
     """Get current provider string for cache key disambiguation."""
-    return PROVIDER
+    return get_provider()
 
 
 def _get_model_for_cache():
     """Get current model version string for cache key disambiguation."""
-    return MODEL_VERSION
+    return get_model_version()
 
 
 # ── Default weights ───────────────────────────────────────────────────────────
@@ -202,6 +203,7 @@ def score_chunk(
     use_cache: bool = True,
     relevance_cutoff: float = None,
     thresholds: list = None,
+    compute_conditional_novelty: bool = False,
 ) -> dict:
     """
     Score a single RAG chunk for usefulness.
@@ -213,13 +215,17 @@ def score_chunk(
       - Caching support to avoid re-scoring the same chunks
 
     Args:
-        chunk           : the text chunk to evaluate
-        query           : the user query (optional but recommended)
-        verbose         : print a human-readable report
-        weights         : dict with novelty/relevance/query_ignorance keys (0-1 each, sum=1)
-        query_knowledge : optional pre-computed knowledge score for the query (saves a probe call)
-        session         : optional ModelSession for incremental novelty across chunks
-        use_cache       : enable cache lookup (default True)
+        chunk                      : the text chunk to evaluate
+        query                      : the user query (optional but recommended)
+        verbose                    : print a human-readable report
+        weights                    : dict with novelty/relevance/query_ignorance keys (0-1 each, sum=1)
+        query_knowledge            : optional pre-computed knowledge score for the query (saves a probe call)
+        session                    : optional ModelSession for incremental novelty across chunks
+        use_cache                  : enable cache lookup (default True)
+        relevance_cutoff           : minimum cosine similarity to count as relevant (default 0.30)
+        thresholds                 : custom verdict thresholds list
+        compute_conditional_novelty: if True, additionally probes query+chunk together to compute
+                                     true conditional novelty. Doubles per-chunk latency. Default False.
 
     Returns:
         {
@@ -246,6 +252,7 @@ def score_chunk(
     caps = provider_capabilities()
     probe_available = caps.get("supports_probe", False)
     embedding_available = caps.get("supports_embeddings", True)
+    probe_fn = _get_probe()
 
     # When probe is unavailable query_ignorance is always 0; redistribute its weight.
     wc = WeightConfig.from_dict(w)
@@ -267,8 +274,8 @@ def score_chunk(
     scoring_mode = "full" if probe_available else "relevance_only"
 
     # Step 1 — probe the chunk (or fallback to relevance-only mode)
-    if probe_available and probe is not None:
-        r_chunk = probe(chunk)
+    if probe_available and probe_fn is not None:
+        r_chunk = probe_fn(chunk)
         # Don't abort on probe failure - use fallback mode instead
         if "error" in r_chunk:
             knowledge_score = 0
@@ -295,7 +302,7 @@ def score_chunk(
     # tokens, the model's KV cache is preconditioned. When we re-probe the next
     # chunk, remaining surprises reflect information not covered by prior chunks.
     incremental_novelty = novelty_score  # Default: same as overall novelty
-    if session is not None and probe_available and probe is not None:
+    if session is not None and probe_available and probe_fn is not None:
         try:
             from .core import tokenize
             # Feed this chunk's tokens through the session to update model state
@@ -311,19 +318,20 @@ def score_chunk(
     # Instead of probing the query string alone, probe query+chunk together
     # and compare to probe(query) alone. The delta is true conditional novelty:
     # how much does this chunk add given this specific query context?
+    # This is opt-in (compute_conditional_novelty) because it doubles per-chunk latency.
     query_knowledge_score = query_knowledge
     conditional_novelty = None
-    if query and probe_available and probe is not None:
+    if compute_conditional_novelty and query and probe_available and probe_fn is not None:
         # Probe query alone to get baseline knowledge
         if query_knowledge_score is None:
-            r_q = probe(query)
+            r_q = probe_fn(query)
             if "error" not in r_q:
                 query_knowledge_score = r_q["knowledge_score"]
 
         # Probe query + chunk together — this measures knowledge of the pair
         if query_knowledge_score is not None:
             combined_text = query + "\n" + chunk
-            r_combined = probe(combined_text)
+            r_combined = probe_fn(combined_text)
             if "error" not in r_combined:
                 combined_knowledge = r_combined["knowledge_score"]
                 # If combined knowledge < query knowledge, the chunk adds information
@@ -332,9 +340,13 @@ def score_chunk(
                 raw_conditional = query_knowledge_score - combined_knowledge
                 conditional_novelty = max(0, min(100, raw_conditional))
 
+    # When conditional novelty is not computed, fall back to base novelty
+    if conditional_novelty is None:
+        conditional_novelty = novelty_score
+
     # ── Fix 2: Query ignorance as a gate, not a blended score ──────────────────
     query_ignorance = 100 - (query_knowledge_score or 0) if query_knowledge_score is not None else 0
-    if query is not None and query_ignorance < 20:
+    if query is not None and probe_available and query_ignorance < 20:
         # Model already knows the answer well — skip retrieval entirely
         skip_result = {
             "rag_score"            : 0,
@@ -344,7 +356,7 @@ def score_chunk(
             "knowledge_score"      : knowledge_score,
             "query_knowledge"      : query_knowledge_score or 0,
             "query_ignorance"      : query_ignorance,
-            "conditional_novelty"  : conditional_novelty if conditional_novelty is not None else novelty_score,
+            "conditional_novelty"  : conditional_novelty,
             "verdict"              : _verdict(0, thresholds)[0],
             "recommendation"       : "Model already knows the answer — no retrieval needed.",
             "chunk"                : chunk,
@@ -415,7 +427,7 @@ def score_chunk(
         "rag_score"            : rag_score,
         "novelty_score"        : novelty_score,
         "incremental_novelty"  : incremental_novelty,
-        "conditional_novelty"  : conditional_novelty if conditional_novelty is not None else novelty_score,
+        "conditional_novelty"  : conditional_novelty,
         "relevance_score"      : relevance_score,
         "knowledge_score"      : knowledge_score,
         "query_knowledge"      : query_knowledge_score if query_knowledge_score is not None else 0,
@@ -459,6 +471,7 @@ def score_chunks(
     diversity_threshold: float = 0.85,
     relevance_cutoff: float = None,
     thresholds: list = None,
+    compute_conditional_novelty: bool = False,
 ) -> list:
     """
     Score multiple chunks and return them ranked by RAG usefulness (best first).
@@ -487,15 +500,17 @@ def score_chunks(
     if not chunks:
         return []
 
+    probe_fn = _get_probe()
+
     # Pre-compute query knowledge once for all chunks
     query_knowledge = None
-    if query and probe is not None:
-        r_query = probe(query)
+    if query and probe_fn is not None:
+        r_query = probe_fn(query)
         if "error" not in r_query:
             query_knowledge = r_query["knowledge_score"]
 
     # ── Query ignorance gate: check if retrieval is even needed ──────────────
-    if query_knowledge is not None and (100 - query_knowledge) < 20:
+    if probe_fn is not None and query_knowledge is not None and (100 - query_knowledge) < 20:
         # Model already knows the answer well — return empty early
         _logger.info("Query ignorance < 20%% — model already knows the answer. Skipping retrieval.")
         return []
@@ -511,7 +526,8 @@ def score_chunks(
         except Exception:
             pass
 
-    session = ModelSession() if incremental and probe is not None else None
+    caps = provider_capabilities()
+    session = ModelSession() if incremental and caps.get("supports_probe", False) and probe_fn is not None else None
 
     results = []
     for i, chunk in enumerate(chunks):
@@ -521,6 +537,7 @@ def score_chunks(
             weights=weights, query_knowledge=query_knowledge,
             session=session, relevance_cutoff=relevance_cutoff,
             thresholds=thresholds,
+            compute_conditional_novelty=compute_conditional_novelty,
         )
         r["original_index"] = i
         results.append(r)
@@ -535,7 +552,7 @@ def score_chunks(
     return results
 
 
-# ── Batched scoring (faster) ─────────────────────────────────────────────────
+# ── Batched scoring ──────────────────────────────────────────────────────────
 
 
 def score_chunks_batch(
@@ -548,8 +565,10 @@ def score_chunks_batch(
     thresholds: list = None,
 ) -> list:
     """
-    Batch version that pre-computes embeddings and probes together.
-    ~3-5x faster than calling score_chunk() in a loop.
+    Score multiple chunks and return them ranked.
+
+    Delegates to score_chunks for all logic. Kept as a separate function
+    for backward compatibility.
 
     Args:
         chunks              : list of text strings
@@ -561,122 +580,12 @@ def score_chunks_batch(
     Returns:
         list of result dicts ranked by rag_score (best first)
     """
-    if not chunks:
-        return []
-
-    # Validate and normalize weights
-    w, weights_valid = _validate_and_normalize_weights(weights)
-
-    total = len(chunks)
-
-    print(f"\n[pymrsf.rag] Batch scoring {total} chunks...")
-
-    # Check if probing is available
-    probe_available = probe is not None
-
-    # Batch probe all chunks (this still runs sequentially, but avoids probe overhead)
-    chunk_results = []
-    if probe_available:
-        for i, chunk in enumerate(chunks):
-            print(f"  probing chunk {i+1}/{total}...", end="\r")
-            r = probe(chunk)
-            chunk_results.append(r)
-    else:
-        # Fallback: no probing available
-        for chunk in chunks:
-            chunk_results.append({
-                "token_count": len(chunk.split()),
-                "surprise_count": 0,
-            })
-
-    # Probe query once
-    query_knowledge = None
-    if query and probe_available:
-        r_query = probe(query)
-        # Handle probe errors gracefully
-        if "error" not in r_query:
-            query_knowledge = r_query["knowledge_score"]
-
-    # Embed all chunks + query once
-    q_vec = None
-    if query:
-        try:
-            q_vec = embed(query)
-        except Exception:
-            pass  # Suppress warning in batch mode
-
-    chunk_embeddings = []
-    for i, chunk in enumerate(chunks):
-        try:
-            chunk_embeddings.append(embed(chunk))
-        except Exception:
-            # Mark embedding failures explicitly instead of using zero vectors
-            chunk_embeddings.append(None)
-
-    print("  computing scores...           \r")
-
-    results = []
-    query_ignorance = 100 - (query_knowledge or 0) if query_knowledge is not None else 0
-
-    for i, (r_chunk, c_vec) in enumerate(zip(chunk_results, chunk_embeddings)):
-        # Don't skip on probe errors - use fallback scoring
-        if "error" in r_chunk:
-            # Fallback to basic scoring
-            knowledge_score = 0
-            novelty_score = 100
-        else:
-            knowledge_score = r_chunk.get("knowledge_score", 0)
-            novelty_score = 100 - knowledge_score
-
-        # Relevance
-        cutoff = relevance_cutoff if relevance_cutoff is not None else DEFAULT_RELEVANCE_CUTOFF
-        relevance_score = 0
-        if query and q_vec is not None and c_vec is not None:
-            cosine = _cosine_similarity(q_vec, c_vec)
-            if cosine >= cutoff:
-                rescaled = (cosine - cutoff) / (1.0 - cutoff)
-                relevance_score = max(0, min(100, round(rescaled * 100)))
-
-        if query:
-            rag_score = round(
-                novelty_score   * w["novelty"] +
-                relevance_score * w["relevance"] +
-                query_ignorance * w["query_ignorance"]
-            )
-        else:
-            rag_score = novelty_score
-
-        rag_score = max(0, min(100, rag_score))
-        verdict, recommendation = _verdict(rag_score, thresholds)
-
-        results.append({
-            "rag_score"           : rag_score,
-            "novelty_score"       : novelty_score,
-            "incremental_novelty" : novelty_score,  # Simplified - not fully implemented yet
-            "relevance_score"     : relevance_score,
-            "knowledge_score"     : knowledge_score,
-            "query_knowledge"     : query_knowledge if query_knowledge is not None else 0,
-            "query_ignorance"     : query_ignorance,
-            "verdict"             : verdict,
-            "recommendation"      : recommendation,
-            "chunk"               : chunks[i],
-            "chunk_preview"       : chunks[i][:80] + ("..." if len(chunks[i]) > 80 else ""),
-            "token_count"         : r_chunk.get("token_count", len(chunks[i].split())),
-            "surprise_count"      : r_chunk.get("surprise_count", 0),
-            "original_index"      : i,
-            "scoring_mode"        : "full" if probe_available and "error" not in r_chunk else "relevance_only",
-            "probe_available"     : probe_available,
-            "embedding_available" : c_vec is not None,
-        })
-
-    _apply_diversity_dedup(results, chunk_embeddings, diversity_threshold)
-
-    results.sort(key=lambda x: x.get("rag_score", 0), reverse=True)
-    for rank, r in enumerate(results):
-        r["rank"] = rank + 1
-
-    print("[pymrsf.rag] Batch done.        ")
-    return results
+    return score_chunks(
+        chunks, query=query, verbose=verbose, weights=weights,
+        diversity_threshold=diversity_threshold,
+        relevance_cutoff=relevance_cutoff, thresholds=thresholds,
+        incremental=False,
+    )
 
 
 def explain_chunk(chunk: str, query: str = None, weights: dict = None) -> None:
@@ -731,15 +640,16 @@ def _print_chunk_report(result: dict, query: str = None, weights: dict = None) -
 
 
 def filter_chunks(
-    chunks              : list,
-    query               : str,
-    min_rag_score       : int = 50,
-    top_k               : int = None,
-    verbose             : bool = False,
-    weights             : dict = None,
-    diversity_threshold : float = 0.85,
-    relevance_cutoff    : float = None,
-    thresholds          : list = None,
+    chunks                      : list,
+    query                       : str,
+    min_rag_score               : int = 50,
+    top_k                       : int = None,
+    verbose                     : bool = False,
+    weights                     : dict = None,
+    diversity_threshold         : float = 0.85,
+    relevance_cutoff            : float = None,
+    thresholds                  : list = None,
+    compute_conditional_novelty : bool = False,
 ) -> list:
     """
     Drop-in filter for RAG pipelines.
@@ -767,6 +677,7 @@ def filter_chunks(
         diversity_threshold=diversity_threshold,
         relevance_cutoff=relevance_cutoff,
         thresholds=thresholds,
+        compute_conditional_novelty=compute_conditional_novelty,
     )
     passed  = [r for r in scored if r["rag_score"] >= min_rag_score]
     dropped = len(scored) - len(passed)
@@ -819,6 +730,7 @@ def smart_filter(
     relevance_cutoff: float = None,
     thresholds: list = None,
     verbose: bool = False,
+    compute_conditional_novelty: bool = False,
 ) -> dict:
     """Adaptive drop-in replacement for filter_chunks().
 
@@ -862,6 +774,7 @@ def smart_filter(
         diversity_threshold=diversity_threshold,
         relevance_cutoff=relevance_cutoff,
         thresholds=thresholds,
+        compute_conditional_novelty=compute_conditional_novelty,
     )
     if not scored:
         return {"chunks": [], "query_ignorance": 0, "budget_applied": "none",
@@ -919,6 +832,7 @@ async def _score_chunk_incremental_async(
     session_lock: asyncio.Lock,
     relevance_cutoff: float,
     thresholds: list,
+    compute_conditional_novelty: bool = False,
 ) -> dict:
     """Score one chunk while holding the session lock so KV cache is fed in order."""
     async with session_lock:
@@ -928,6 +842,7 @@ async def _score_chunk_incremental_async(
             query_knowledge=query_knowledge, session=session,
             use_cache=True, relevance_cutoff=relevance_cutoff,
             thresholds=thresholds,
+            compute_conditional_novelty=compute_conditional_novelty,
         )
 
 
@@ -942,6 +857,7 @@ async def score_chunk_async(
     session_lock: asyncio.Lock = None,
     relevance_cutoff: float = None,
     thresholds: list = None,
+    compute_conditional_novelty: bool = False,
 ) -> dict:
     """
     Async version of score_chunk - runs scoring in executor to avoid blocking.
@@ -957,12 +873,14 @@ async def score_chunk_async(
         return await _score_chunk_incremental_async(
             chunk, query, weights, query_knowledge,
             session, session_lock, relevance_cutoff, thresholds,
+            compute_conditional_novelty=compute_conditional_novelty,
         )
     return await asyncio.to_thread(
         score_chunk, chunk,
         query=query, verbose=verbose, weights=weights,
         query_knowledge=query_knowledge, use_cache=use_cache,
         relevance_cutoff=relevance_cutoff, thresholds=thresholds,
+        compute_conditional_novelty=compute_conditional_novelty,
     )
 
 
@@ -976,6 +894,7 @@ async def score_chunks_async(
     incremental: bool = False,
     relevance_cutoff: float = None,
     thresholds: list = None,
+    compute_conditional_novelty: bool = False,
 ) -> list[dict]:
     """
     Async version that scores multiple chunks concurrently.
@@ -1003,16 +922,18 @@ async def score_chunks_async(
     if not chunks:
         return []
 
+    probe_fn = _get_probe()
+
     # Pre-compute query knowledge once
     query_knowledge = None
-    if query and probe is not None:
-        r_query = await asyncio.to_thread(probe, query)
+    if query and probe_fn is not None:
+        r_query = await asyncio.to_thread(probe_fn, query)
         if "error" not in r_query:
             query_knowledge = r_query["knowledge_score"]
 
     # ── Incremental path: sequential, shared session + lock ──────────────────
     caps = provider_capabilities()
-    use_incremental = incremental and caps.get("supports_probe", False)
+    use_incremental = incremental and caps.get("supports_probe", False) and probe_fn is not None
 
     if use_incremental:
         print(f"\n[pymrsf.rag] Async scoring {len(chunks)} chunks (incremental=True, sequential)...")
@@ -1024,6 +945,7 @@ async def score_chunks_async(
             result = await _score_chunk_incremental_async(
                 chunk, query, weights, query_knowledge,
                 session, session_lock, relevance_cutoff, thresholds,
+                compute_conditional_novelty=compute_conditional_novelty,
             )
             result["original_index"] = i
             results.append(result)
@@ -1039,6 +961,7 @@ async def score_chunks_async(
                     chunk=chunk, query=query, verbose=verbose,
                     weights=weights, query_knowledge=query_knowledge,
                     relevance_cutoff=relevance_cutoff, thresholds=thresholds,
+                    compute_conditional_novelty=compute_conditional_novelty,
                 )
                 result["original_index"] = i
                 return result
@@ -1082,6 +1005,7 @@ async def filter_chunks_async(
     max_concurrent: int = 10,
     relevance_cutoff: float = None,
     thresholds: list = None,
+    compute_conditional_novelty: bool = False,
 ) -> list[str]:
     """
     Async version of filter_chunks - non-blocking RAG pipeline filter.
@@ -1114,6 +1038,7 @@ async def filter_chunks_async(
         max_concurrent=max_concurrent,
         relevance_cutoff=relevance_cutoff,
         thresholds=thresholds,
+        compute_conditional_novelty=compute_conditional_novelty,
     )
 
     passed = [r for r in scored if r["rag_score"] >= min_rag_score]

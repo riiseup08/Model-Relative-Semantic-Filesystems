@@ -3,6 +3,9 @@
 import sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from unittest.mock import patch
+import pytest
+
 from pymrsf.rag import (
     _cosine_similarity, _verdict, score_chunk,
     score_chunks, score_chunks_batch, filter_chunks,
@@ -82,6 +85,11 @@ class TestDefaultWeights:
 
 
 class TestScoreChunkNoModel:
+    @pytest.fixture(autouse=True)
+    def _no_probe(self):
+        with patch("pymrsf.rag._get_probe", return_value=None):
+            yield
+
     def test_chunk_too_short(self):
         result = score_chunk("Hi", query="test")
         assert "error" in result or result["token_count"] <= 2
@@ -102,6 +110,11 @@ class TestScoreChunkNoModel:
 
 
 class TestEmptyInputs:
+    @pytest.fixture(autouse=True)
+    def _no_probe(self):
+        with patch("pymrsf.rag._get_probe", return_value=None):
+            yield
+
     def test_score_chunks_empty(self):
         assert score_chunks([], query="test") == []
 
@@ -116,4 +129,79 @@ class TestEmptyInputs:
         assert isinstance(result, list)
 
 
-import pytest
+class TestConditionalNoveltyProbeCount:
+    """Verify compute_conditional_novelty flag controls the number of probe calls."""
+
+    def _clear(self):
+        from pymrsf import cache
+        cache.clear_cache(reset_stats=True)
+        cache.configure_cache(enabled=False)
+
+    def _fake_probe(self, calls_list):
+        def probe(text):
+            calls_list.append(text)
+            return {"knowledge_score": 50, "token_count": len(text.split()),
+                    "surprise_count": 0}
+        return probe
+
+    def _caps(self):
+        return {"supports_probe": True, "supports_embeddings": True,
+                "supports_delta": True, "provider": "local"}
+
+    def test_probe_count_off(self):
+        """compute_conditional_novelty=False → N+1 probe calls (1 query + N chunks)."""
+        self._clear()
+        calls = []
+        with patch("pymrsf.rag._get_probe", return_value=self._fake_probe(calls)), \
+             patch("pymrsf.rag.provider_capabilities", return_value=self._caps()), \
+             patch("pymrsf.rag.embed", return_value=[0.1] * 768):
+            from pymrsf.rag import score_chunks
+            score_chunks(["a", "b", "c"], query="test", compute_conditional_novelty=False)
+        assert len(calls) == 4, f"Expected 4 probe calls, got {len(calls)}"
+
+    def test_probe_count_on(self):
+        """compute_conditional_novelty=True → 2N+1 probe calls (1 query + N chunks + N combined)."""
+        self._clear()
+        calls = []
+        with patch("pymrsf.rag._get_probe", return_value=self._fake_probe(calls)), \
+             patch("pymrsf.rag.provider_capabilities", return_value=self._caps()), \
+             patch("pymrsf.rag.embed", return_value=[0.1] * 768):
+            from pymrsf.rag import score_chunks
+            score_chunks(["a", "b", "c"], query="test", compute_conditional_novelty=True)
+        assert len(calls) == 7, f"Expected 7 probe calls, got {len(calls)}"
+
+    def test_conditional_novelty_in_result(self):
+        """When compute_conditional_novelty=True, conditional_novelty appears in result."""
+        self._clear()
+        calls = []
+        with patch("pymrsf.rag._get_probe", return_value=self._fake_probe(calls)), \
+             patch("pymrsf.rag.provider_capabilities", return_value=self._caps()), \
+             patch("pymrsf.rag.embed", return_value=[0.1] * 768):
+            from pymrsf.rag import score_chunks
+            results = score_chunks(["chunk"], query="test", compute_conditional_novelty=True)
+        assert "conditional_novelty" in results[0]
+        assert results[0]["conditional_novelty"] >= 0
+
+    def test_conditional_novelty_passes_through_filter_chunks(self):
+        """filter_chunks should accept and forward compute_conditional_novelty."""
+        self._clear()
+        calls = []
+        with patch("pymrsf.rag._get_probe", return_value=self._fake_probe(calls)), \
+             patch("pymrsf.rag.provider_capabilities", return_value=self._caps()), \
+             patch("pymrsf.rag.embed", return_value=[0.1] * 768):
+            from pymrsf.rag import filter_chunks
+            result = filter_chunks(["chunk"], query="test", compute_conditional_novelty=True)
+        assert isinstance(result, list)
+
+    def test_conditional_novelty_passes_through_smart_filter(self):
+        """smart_filter should accept and forward compute_conditional_novelty."""
+        self._clear()
+        calls = []
+        with patch("pymrsf.rag._get_probe", return_value=self._fake_probe(calls)), \
+             patch("pymrsf.rag.provider_capabilities", return_value=self._caps()), \
+             patch("pymrsf.rag.embed", return_value=[0.1] * 768):
+            from pymrsf.rag import smart_filter
+            result = smart_filter(["chunk"], query="test", compute_conditional_novelty=True)
+        assert isinstance(result, dict)
+        assert "chunks" in result
+

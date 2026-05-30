@@ -1,93 +1,105 @@
 """
 pymrsf.chunker — Surprise-guided auto-chunking
 
-Instead of splitting text at fixed sizes or sentence boundaries, smart_chunk()
-uses the model's own surprise signal to find natural knowledge boundaries.
+Splits text at knowledge boundaries using the model's own signal:
 
-How it works:
-  1. Run get_surprises(text) — the model scores every token for "surprise"
-  2. Compute a rolling average of surprise over a sliding window
-  3. Find positions where the rolling average drops sharply after a local peak
-     → these are "absorption points" where the model finished learning a concept
-  4. Map token positions back to character offsets and split there
-  5. Merge chunks that are too short; split chunks that are too long
-
-This produces chunks that are semantically coherent from the model's perspective,
-unlike arbitrary character/sentence splitting.
-
-Requires local provider (get_surprises uses raw logits).
-Falls back to sentence-based splitting for API providers.
+  - **Local provider**: uses token-level logprobs (surprise) to find
+    natural topic transitions.
+  - **API providers** (OpenAI, Anthropic): uses embedding cosine similarity
+    between sliding windows to detect topic shifts.
+  - **Fallback**: sentence-based splitting when neither is available.
 """
 
 import logging
 import re
+
+import numpy as np
 
 from .core import detokenize, get_surprises, provider_capabilities, tokenize
 
 _logger = logging.getLogger("pymrsf.chunker")
 
 
-def _sentence_fallback(text: str, max_chunk_len: int) -> list[str]:
-    """Simple sentence-based chunking used as fallback for API providers."""
-    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
-    chunks, current = [], []
-    current_len = 0
-    for sent in sentences:
-        if current_len + len(sent) > max_chunk_len and current:
-            chunks.append(" ".join(current))
-            current, current_len = [], 0
-        current.append(sent)
-        current_len += len(sent) + 1
-    if current:
-        chunks.append(" ".join(current))
-    return [c for c in chunks if c.strip()]
+# ── Embedding-based topic boundary detection (API providers) ───────────────
 
 
-def smart_chunk(
-    text: str,
-    min_chunk_len: int = 100,
-    max_chunk_len: int = 1000,
-    surprise_drop_threshold: float = 0.4,
-    window: int = 5,
-) -> list[str]:
-    """Split text into semantically coherent chunks using the model's surprise signal.
+def _embed_boundaries(text: str) -> list[int]:
+    """Find topic boundaries using embedding similarity between sliding windows.
 
-    Chunk boundaries are placed where the rolling-average surprise drops
-    significantly after a local peak — indicating the model has absorbed a
-    new knowledge unit and "settled" before the next concept begins.
+    For API providers that don't expose token logprobs, we detect topic
+    transitions by measuring cosine similarity between adjacent embedding
+    windows.  A sharp drop in similarity indicates a topic boundary.
 
-    Requires local provider. Falls back to sentence splitting for API providers.
-
-    Args:
-        text                   : Document text to chunk
-        min_chunk_len          : Minimum characters per chunk (merge shorter ones)
-        max_chunk_len          : Maximum characters per chunk (force-split longer ones)
-        surprise_drop_threshold: Fractional drop in rolling surprise to trigger a boundary
-                                 (0.4 = 40% drop from local peak triggers a cut)
-        window                 : Rolling average window in tokens
-
-    Returns:
-        List of text chunk strings
-
-    Example:
-        from pymrsf import smart_chunk
-        chunks = smart_chunk(long_article, min_chunk_len=200, max_chunk_len=800)
+    Returns list of character offsets where boundaries should be placed.
     """
-    caps = provider_capabilities()
-    if not caps.get("supports_logits", False):
-        _logger.warning("Local provider not available — falling back to sentence chunking.")
-        return _sentence_fallback(text, max_chunk_len)
+    from .embeddings import embed
 
+    WINDOW_CHARS = 300
+    STRIDE = 100
+    SIM_THRESHOLD = 0.70
+
+    if len(text) <= WINDOW_CHARS:
+        return []
+
+    # Build sliding windows
+    windows: list[str] = []
+    offsets: list[int] = []
+    pos = 0
+    while pos < len(text):
+        chunk = text[pos : pos + WINDOW_CHARS]
+        if len(chunk) < WINDOW_CHARS // 2:
+            break  # skip tail shorter than half a window
+        windows.append(chunk)
+        offsets.append(pos)
+        pos += STRIDE
+
+    if len(windows) < 2:
+        return []
+
+    # Embed each window (embed() accepts a single string)
     try:
-        surprises_data = get_surprises(text)
-    except Exception as e:
-        _logger.warning("get_surprises failed (%s) — falling back to sentence chunking.", e)
-        return _sentence_fallback(text, max_chunk_len)
+        vecs = np.array([embed(w) for w in windows], dtype=np.float32)
+    except Exception:
+        return []
 
-    # surprises_data is expected to be a list of dicts: [{position, token_str, surprised}, ...]
-    # or a list of (position, token_str) tuples — handle both formats
+    if len(vecs) < 2:
+        return []
+
+    # Normalize
+    norms = np.linalg.norm(vecs, axis=1, keepdims=True)
+    norms = np.where(norms == 0, 1.0, norms)
+    vecs = vecs / norms
+
+    # Find drops in similarity between adjacent windows
+    # sims[i] = similarity between window[i] and window[i+1]
+    sims = np.sum(vecs[:-1] * vecs[1:], axis=1)
+    boundary_offsets: list[int] = []
+    for i in range(1, len(sims)):
+        if sims[i - 1] - sims[i] > (1.0 - SIM_THRESHOLD):
+            # Place boundary midway between the two windows
+            mid = (offsets[i] + offsets[i + 1]) // 2 if i + 1 < len(offsets) else offsets[i]
+            boundary_offsets.append(mid)
+
+    return sorted(set(boundary_offsets))
+
+
+# ── Logprob-based topic boundary detection (local provider) ────────────────
+
+
+def _logprob_boundaries(
+    text: str,
+    surprise_drop_threshold: float,
+    window: int,
+) -> list[int]:
+    """Find topic boundaries using token-level logprob surprise.
+
+    For the local provider with raw logit access.  Returns character
+    offsets where boundaries should be placed.
+    """
+    surprises_data = get_surprises(text)
+
     if not surprises_data:
-        return _sentence_fallback(text, max_chunk_len)
+        return []
 
     # Normalise to list of (position, token_str, is_surprised)
     def _parse(item):
@@ -120,20 +132,16 @@ def smart_chunk(
             peak = rolling[i]
         elif peak > 0 and (peak - rolling[i]) / peak >= surprise_drop_threshold:
             boundary_positions.append(i)
-            peak = rolling[i]  # reset peak after boundary
+            peak = rolling[i]
 
     # Map token positions to character offsets
-    # Reconstruct token-by-token to get character positions
     try:
         token_ids = tokenize(text)
     except Exception:
-        return _sentence_fallback(text, max_chunk_len)
+        return []
 
-    # Build cumulative char offsets in O(n) by detokenizing one token at a time.
-    # boundary_positions are sorted ascending, so we walk token_ids once.
-    set(boundary_positions)
     cum_len = 0
-    cum_chars: list[int] = [0]  # cum_chars[i] = char offset just before token i
+    cum_chars: list[int] = [0]
     for tid in token_ids:
         try:
             cum_len += len(detokenize([tid]))
@@ -146,37 +154,127 @@ def smart_chunk(
         if bp < len(cum_chars):
             char_boundaries.append(cum_chars[bp])
 
-    if not char_boundaries:
-        return _sentence_fallback(text, max_chunk_len)
+    return char_boundaries
 
-    # Split text at char boundaries
+
+# ── Sentence-based fallback ────────────────────────────────────────────────
+
+
+def _sentence_fallback(text: str, max_chunk_len: int) -> list[str]:
+    """Simple sentence-based chunking used as fallback."""
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    chunks, current = [], []
+    current_len = 0
+    for sent in sentences:
+        if current_len + len(sent) > max_chunk_len and current:
+            chunks.append(" ".join(current))
+            current, current_len = [], 0
+        current.append(sent)
+        current_len += len(sent) + 1
+    if current:
+        chunks.append(" ".join(current))
+    return [c for c in chunks if c.strip()]
+
+
+# ── Post-processing helpers ────────────────────────────────────────────────
+
+
+def _split_at_boundaries(text: str, char_boundaries: list[int]) -> list[str]:
+    if not char_boundaries:
+        return [text] if text.strip() else []
+
     raw_chunks: list[str] = []
     prev = 0
     for cb in sorted(set(char_boundaries)):
         raw_chunks.append(text[prev:cb])
         prev = cb
     raw_chunks.append(text[prev:])
-    raw_chunks = [c for c in raw_chunks if c.strip()]
+    return [c for c in raw_chunks if c.strip()]
 
-    # Post-process: merge short chunks, force-split long ones
-    chunks: list[str] = []
+
+def _merge_short_chunks(chunks: list[str], min_chunk_len: int) -> list[str]:
+    merged: list[str] = []
     buffer = ""
-    for chunk in raw_chunks:
+    for chunk in chunks:
         if len(buffer) + len(chunk) < min_chunk_len:
             buffer += (" " if buffer else "") + chunk.strip()
         else:
             if buffer:
-                chunks.append(buffer.strip())
+                merged.append(buffer.strip())
             buffer = chunk.strip()
     if buffer:
-        chunks.append(buffer.strip())
+        merged.append(buffer.strip())
+    return merged
 
-    # Force-split chunks that exceed max_chunk_len at sentence boundaries
+
+def _force_split_long(chunks: list[str], max_chunk_len: int) -> list[str]:
     final: list[str] = []
     for chunk in chunks:
         if len(chunk) <= max_chunk_len:
             final.append(chunk)
         else:
             final.extend(_sentence_fallback(chunk, max_chunk_len))
+    return final
 
-    return [c for c in final if c.strip()] or [text]
+
+# ── Main public API ────────────────────────────────────────────────────────
+
+
+def smart_chunk(
+    text: str,
+    min_chunk_len: int = 100,
+    max_chunk_len: int = 1000,
+    surprise_drop_threshold: float = 0.4,
+    window: int = 5,
+) -> list[str]:
+    """Split text into semantically coherent chunks at knowledge boundaries.
+
+    Boundary detection strategy (chosen automatically based on provider):
+      - **Local provider**: token-level logprob surprise (most precise)
+      - **API providers** (OpenAI, Anthropic): embedding cosine similarity
+        between sliding windows (good topic shift detection)
+      - **Fallback**: sentence-based splitting (no embeddings available)
+
+    Args:
+        text                   : Document text to chunk
+        min_chunk_len          : Minimum characters per chunk (merge shorter ones)
+        max_chunk_len          : Maximum characters per chunk (force-split longer ones)
+        surprise_drop_threshold: Logprob-only — fractional drop in rolling surprise
+                                 to trigger a boundary (0.4 = 40% drop)
+        window                 : Logprob-only — rolling average window in tokens
+
+    Returns:
+        List of text chunk strings
+    """
+    if not text or not text.strip():
+        return []
+
+    caps = provider_capabilities()
+    char_boundaries: list[int] = []
+
+    if caps.get("supports_logits", False):
+        # Local provider: logprob-based detection
+        try:
+            char_boundaries = _logprob_boundaries(text, surprise_drop_threshold, window)
+        except Exception as e:
+            _logger.warning("logprob chunking failed (%s) — trying embedding fallback.", e)
+
+    if not char_boundaries and caps.get("supports_embeddings", False):
+        # API provider or logprob failed: embedding-based detection
+        try:
+            char_boundaries = _embed_boundaries(text)
+        except Exception as e:
+            _logger.warning("embedding chunking failed (%s) — falling back to sentence splitting.", e)
+
+    if not char_boundaries:
+        _logger.info("No surprise/embedding signal — falling back to sentence chunking.")
+        return _sentence_fallback(text, max_chunk_len)
+
+    # Split at detected boundaries
+    raw_chunks = _split_at_boundaries(text, char_boundaries)
+
+    # Post-process
+    chunks = _merge_short_chunks(raw_chunks, min_chunk_len)
+    chunks = _force_split_long(chunks, max_chunk_len)
+
+    return [c for c in chunks if c.strip()] or [text]

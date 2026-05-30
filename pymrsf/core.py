@@ -59,8 +59,25 @@ _logger = logging.getLogger("pymrsf.core")
 
 load_dotenv()
 
-PROVIDER        = os.getenv("PYMRSF_PROVIDER", "local").lower()
-LOGIT_PRECISION = int(os.getenv("PYMRSF_LOGIT_PRECISION", "6"))
+
+def _cfg():
+    """Return the current Config, or None if pymrsf isn't fully initialised."""
+    try:
+        import pymrsf
+        return pymrsf._config
+    except (ImportError, AttributeError):
+        return None
+
+
+def _provider() -> str:
+    cfg = _cfg()
+    return (cfg.provider if cfg else os.getenv("PYMRSF_PROVIDER", "local")).lower()
+
+
+def _logit_precision() -> int:
+    cfg = _cfg()
+    return cfg.logit_precision if cfg else int(os.getenv("PYMRSF_LOGIT_PRECISION", "6"))
+
 
 # ── Lazy model loading ────────────────────────────────────────────────────────
 # The LLM model is NOT loaded at import time. It's loaded on first use.
@@ -75,7 +92,8 @@ def _ensure_model():
     global _lm, _lm_loaded
     if _lm_loaded:
         return
-    if PROVIDER == "local":
+    provider = _provider()
+    if provider == "local":
         try:
             import numpy as np  # noqa: F401  — availability check
             from llama_cpp import Llama
@@ -88,15 +106,16 @@ def _ensure_model():
                 "    Set PYMRSF_PROVIDER=anthropic (requires Anthropic API key)\n"
             )
 
-        GGUF_PATH     = os.getenv("PYMRSF_MODEL_PATH",    "./models/mistral-7b-v0.1.Q4_K_M.gguf")
-        N_CTX         = int(os.getenv("PYMRSF_N_CTX",         "4096"))
-        N_GPU_LAYERS  = int(os.getenv("PYMRSF_N_GPU_LAYERS",  "0"))
-        N_THREADS     = int(os.getenv("PYMRSF_N_THREADS",     str(os.cpu_count())))
+        cfg = _cfg()
+        GGUF_PATH    = cfg.model_path if cfg else os.getenv("PYMRSF_MODEL_PATH", "./models/mistral-7b-v0.1.Q4_K_M.gguf")
+        N_CTX        = cfg.n_ctx if cfg else int(os.getenv("PYMRSF_N_CTX", "4096"))
+        N_GPU_LAYERS = cfg.n_gpu_layers if cfg else int(os.getenv("PYMRSF_N_GPU_LAYERS", "0"))
+        N_THREADS    = cfg.n_threads if cfg else int(os.getenv("PYMRSF_N_THREADS", str(os.cpu_count() or 4)))
 
         if not os.path.exists(GGUF_PATH):
             raise FileNotFoundError(
                 f"\n[pymrsf] Model not found: {GGUF_PATH}\n"
-                f"  Set PYMRSF_MODEL_PATH in your .env"
+                f"  Set PYMRSF_MODEL_PATH in your .env or call pymrsf.configure(model_path=...)"
             )
 
         _logger.info("Loading local model: %s", GGUF_PATH)
@@ -110,12 +129,12 @@ def _ensure_model():
         )
         _logger.info("Model loaded.")
         _lm_loaded = True
-    elif PROVIDER == "openai":
+    elif provider == "openai":
         _lm_loaded = True  # No LLM to load, just mark as ready
-    elif PROVIDER == "anthropic":
+    elif provider == "anthropic":
         _lm_loaded = True  # No LLM to load — Anthropic doesn't expose logprobs
     else:
-        raise ValueError(f"[pymrsf] Unknown provider: '{PROVIDER}'")
+        raise ValueError(f"[pymrsf] Unknown provider: '{provider}'")
 
 
 # ── Local provider ─────────────────────────────────────────────────────────────
@@ -134,7 +153,7 @@ def _load_local_backend():
         return _lm.detokenize(ids).decode("utf-8", errors="replace")
 
     def _quantized_argmax(raw_logits) -> int:
-        q = np.round(np.array(raw_logits, dtype=np.float64), decimals=LOGIT_PRECISION)
+        q = np.round(np.array(raw_logits, dtype=np.float64), decimals=_logit_precision())
         return int(np.argmax(q))
 
     quantized_argmax = _quantized_argmax
@@ -252,7 +271,8 @@ def _load_openai_backend():
             "  Or use the local provider: Set PYMRSF_PROVIDER=local\n"
         )
 
-    MODEL_VERSION = os.getenv("PYMRSF_MODEL_VERSION", "gpt-3.5-turbo")
+    cfg = _cfg()
+    model_version = (cfg.model_version if cfg else os.getenv("PYMRSF_MODEL_VERSION", "")) or "gpt-3.5-turbo"
     api_key = os.getenv("OPENAI_API_KEY")
 
     if not api_key:
@@ -264,13 +284,13 @@ def _load_openai_backend():
         )
 
     _client = OpenAI(api_key=api_key)
-    _logger.info("Using OpenAI provider: %s", MODEL_VERSION)
+    _logger.info("Using OpenAI provider: %s", model_version)
     _logger.info("Note: Advanced features (knowledge probing) require local provider.")
 
     def tokenize(text: str) -> list:
         try:
             import tiktoken
-            enc = tiktoken.encoding_for_model(MODEL_VERSION)
+            enc = tiktoken.encoding_for_model(model_version)
             return enc.encode(text)
         except Exception as e:
             _logger.warning("tiktoken failed (%s), falling back to split()", e)
@@ -280,7 +300,7 @@ def _load_openai_backend():
         """Convert token IDs back to string. Uses tiktoken if available."""
         try:
             import tiktoken
-            enc = tiktoken.encoding_for_model(MODEL_VERSION)
+            enc = tiktoken.encoding_for_model(model_version)
             return enc.decode(ids)
         except Exception as e:
             _logger.warning("tiktoken decode failed (%s), falling back to str join", e)
@@ -296,31 +316,82 @@ def _load_openai_backend():
 
 
     def get_surprises(text: str) -> tuple:
+        """
+        Token-level surprise detection via OpenAI legacy completions endpoint.
+
+        Uses echo=True + logprobs on a completion-model endpoint to get
+        per-position logprobs for the entire input prompt. This requires
+        a model that supports the legacy completions API
+        (e.g. gpt-3.5-turbo-instruct).
+
+        Raises:
+            NotImplementedError: If the model doesn't support echo logprobs.
+        """
         import math
-        SURPRISE_THRESHOLD = float(os.getenv("PYMRSF_SURPRISE_THRESHOLD", "-1.0"))
-        response = _client.chat.completions.create(
-            model=MODEL_VERSION,
-            messages=[{"role": "user", "content": text}],
-            logprobs=True,
-            max_tokens=1,
+        _COMPLETION_MODELS = {"gpt-3.5-turbo-instruct", "davinci-002", "babbage-002"}
+
+        def _supports_echo_logprobs(m: str) -> bool:
+            return m in _COMPLETION_MODELS or m.endswith("-instruct")
+
+        if not _supports_echo_logprobs(model_version):
+            raise NotImplementedError(
+                f"\n[pymrsf] OpenAI model '{model_version}' does not support "
+                "input-prompt logprobs (the Chat Completions API only returns "
+                "logprobs of generated tokens, not the prompt).\n"
+                "  Options:\n"
+                "    1. pymrsf.configure(model_version='gpt-3.5-turbo-instruct')\n"
+                "    2. Switch to the local provider: pymrsf.configure(provider='local')\n"
+                "    3. Use score_chunk() / filter_chunks() which fall back to "
+                "relevance-only scoring without surprises.\n"
+            )
+
+        threshold = (cfg.surprise_threshold if cfg
+                     else float(os.getenv("PYMRSF_SURPRISE_THRESHOLD", "-1.0")))
+
+        response = _client.completions.create(
+            model=model_version, prompt=text,
+            max_tokens=0, echo=True, logprobs=5,
         )
-        token_logprobs = response.choices[0].logprobs.content or []
+
+        lp = response.choices[0].logprobs
+        tokens = lp.tokens
+        token_logprobs = lp.token_logprobs
+        top_logprobs = lp.top_logprobs
+
+        n = len(tokens)
         surprises = []
         heatmap = []
-        for i, token_info in enumerate(token_logprobs):
-            tok = token_info.token
-            logprob = token_info.logprob
-            surprised = (logprob is not None and logprob < SURPRISE_THRESHOLD)
+
+        for i in range(n):
+            logprob = token_logprobs[i]
+            if i == 0 or logprob is None:
+                heatmap.append({
+                    "token": tokens[i],
+                    "surprised": False,
+                    "position": i,
+                    "logprob": None,
+                    "prob": None,
+                })
+                continue
+
+            # Two signals: argmax surprise and threshold surprise
+            argmax_surprise = False
+            if top_logprobs[i]:
+                top_token = max(top_logprobs[i].items(), key=lambda kv: kv[1])[0]
+                argmax_surprise = top_token != tokens[i]
+            threshold_surprise = logprob < threshold
+            surprised = argmax_surprise or threshold_surprise
+
             if surprised:
-                surprises.append((i, tok))
+                surprises.append((i, tokens[i]))
             heatmap.append({
-                "token": tok,
+                "token": tokens[i],
                 "surprised": surprised,
                 "position": i,
-                "logprob": round(logprob, 4) if logprob else None,
-                "prob": round(math.exp(logprob), 4) if logprob else 0.0,
+                "logprob": round(logprob, 4),
+                "prob": round(math.exp(logprob), 4),
             })
-        n = len(token_logprobs)
+
         return surprises, heatmap, n
 
     def compute_delta(text_or_ids) -> list:
@@ -378,7 +449,8 @@ def _load_anthropic_backend():
             "  Or use the local provider: Set PYMRSF_PROVIDER=local\n"
         )
 
-    MODEL_VERSION = os.getenv("PYMRSF_MODEL_VERSION", "claude-3-5-sonnet-20241022")
+    cfg = _cfg()
+    model_version = (cfg.model_version if cfg else os.getenv("PYMRSF_MODEL_VERSION", "")) or "claude-3-5-sonnet-20241022"
     api_key = os.getenv("ANTHROPIC_API_KEY")
 
     if not api_key:
@@ -390,7 +462,7 @@ def _load_anthropic_backend():
         )
 
     _client = Anthropic(api_key=api_key)
-    _logger.info("Using Anthropic provider: %s", MODEL_VERSION)
+    _logger.info("Using Anthropic provider: %s", model_version)
     _logger.info("Anthropic does not expose logprobs — using relevance-only RAG scoring.")
 
     def tokenize(text: str) -> list:
@@ -424,7 +496,7 @@ def _load_anthropic_backend():
     def get_surprises(text: str) -> tuple:
         """
         Anthropic doesn't provide logprobs, so we can't detect surprises.
-        Return empty surprises and basic token heatmap.
+        Return empty surprises and basic token heatmap with decoded strings.
         """
         tokens = tokenize(text)
         n = len(tokens)
@@ -433,7 +505,7 @@ def _load_anthropic_backend():
 
         # Since we can't determine surprises, mark all as not surprised
         for i, tok_id in enumerate(tokens):
-            tok_str = str(tok_id)  # Approximate
+            tok_str = detokenize([tok_id]).strip() or f"<{tok_id}>"
             heatmap.append({
                 "token": tok_str,
                 "surprised": False,
@@ -489,17 +561,18 @@ _backend = None
 def _get_backend():
     global _backend
     if _backend is None:
-        if PROVIDER == "local":
+        provider = _provider()
+        if provider == "local":
             _backend = _load_local_backend()
-        elif PROVIDER == "openai":
+        elif provider == "openai":
             _backend = _load_openai_backend()
-        elif PROVIDER == "anthropic":
+        elif provider == "anthropic":
             _backend = _load_anthropic_backend()
         else:
             raise ValueError(
-                f"\n[pymrsf] Unknown provider: '{PROVIDER}'\n"
+                f"\n[pymrsf] Unknown provider: '{provider}'\n"
                 f"  Valid options: local, openai, anthropic\n"
-                f"  Set PYMRSF_PROVIDER in your .env file.\n"
+                f"  Call pymrsf.configure(provider=...) or set PYMRSF_PROVIDER in your .env file.\n"
             )
     return _backend
 
@@ -692,13 +765,14 @@ def provider_capabilities() -> dict:
         >>> else:
         ...     print("Probing unavailable with this provider")
     """
+    provider = _provider()
     capabilities = {
-        "provider": PROVIDER,
+        "provider": provider,
         "supports_tokenization": True,  # All providers (may be approximate)
         "supports_embeddings": True,    # All providers support embeddings
     }
 
-    if PROVIDER == "local":
+    if provider == "local":
         capabilities.update({
             "supports_logits": True,
             "supports_probe": True,
@@ -706,7 +780,7 @@ def provider_capabilities() -> dict:
             "supports_sessions": True,
             "supports_true_surprises": True,
         })
-    elif PROVIDER == "openai":
+    elif provider == "openai":
         capabilities.update({
             "supports_logits": False,      # No raw logits
             "supports_probe": False,       # Needs exact surprises
@@ -714,7 +788,7 @@ def provider_capabilities() -> dict:
             "supports_sessions": False,    # No KV cache access
             "supports_true_surprises": False,  # Only threshold-based via API
         })
-    elif PROVIDER == "anthropic":
+    elif provider == "anthropic":
         capabilities.update({
             "supports_logits": False,
             "supports_probe": False,
@@ -759,9 +833,9 @@ def get_raw_lm():
     backend = _get_backend()
     lm_obj = backend.get("lm")
 
-    if lm_obj is None and PROVIDER != "local":
+    if lm_obj is None and _provider() != "local":
         raise NotImplementedError(
-            f"\n[pymrsf] Raw model access not available with {PROVIDER} provider.\n"
+            f"\n[pymrsf] Raw model access not available with {_provider()} provider.\n"
             f"  This feature requires the local provider.\n"
             f"  Install with: pip install pymrsf[local]\n"
             f"  And set: PYMRSF_PROVIDER=local\n"
@@ -772,27 +846,37 @@ def get_raw_lm():
 
 # ── MODEL_VERSION (provider-aware) ─────────────────────────────────────────────
 
+_MODEL_DEFAULTS = {
+    "local": "mistral-7b-q4km-v1",
+    "openai": "gpt-3.5-turbo",
+    "anthropic": "claude-3-5-sonnet-20241022",
+}
+
+
 def _get_model_version() -> str:
-    """Get the current model version string based on provider."""
-    if PROVIDER == "local":
-        return os.getenv("PYMRSF_MODEL_VERSION", "mistral-7b-q4km-v1")
-    elif PROVIDER == "openai":
-        return os.getenv("PYMRSF_MODEL_VERSION", "gpt-3.5-turbo")
-    elif PROVIDER == "anthropic":
-        return os.getenv("PYMRSF_MODEL_VERSION", "claude-3-5-sonnet-20241022")
-    else:
-        return "unknown"
+    """Get the current model version string (live from Config, env, or provider default)."""
+    cfg = _cfg()
+    explicit = (cfg.model_version if cfg else os.getenv("PYMRSF_MODEL_VERSION", ""))
+    if explicit:
+        return explicit
+    return _MODEL_DEFAULTS.get(_provider(), "unknown")
 
 
-MODEL_VERSION = _get_model_version()
+def get_provider() -> str:
+    """Return the current provider name (live, not captured at import time)."""
+    return _provider()
+
+
+def get_model_version() -> str:
+    """Return the current model version string (live, not captured at import time)."""
+    return _get_model_version()
 
 
 def set_provider(name: str) -> None:
     """Switch providers at runtime.
 
-    Resets the cached model state and updates the PYMRSF_PROVIDER env var.
-    Switching away from 'local' releases the GGUF model from memory on next use.
-    Switching to 'local' triggers a fresh model load on first use.
+    Delegates to pymrsf.configure() which invalidates model state and
+    syncs the env var. This ensures both code paths use identical reset logic.
 
     Args:
         name: Provider name — "local", "openai", or "anthropic"
@@ -800,9 +884,17 @@ def set_provider(name: str) -> None:
     Example:
         >>> set_provider("openai")
     """
-    global PROVIDER, MODEL_VERSION, _lm, _lm_loaded
-    PROVIDER = name.lower()
-    _lm = None
-    _lm_loaded = False
-    os.environ["PYMRSF_PROVIDER"] = PROVIDER
-    MODEL_VERSION = _get_model_version()
+    import pymrsf
+    pymrsf.configure(provider=name.lower())
+
+
+# ── PEP 562 __getattr__ for backward-compat module-level constants ──────────
+
+def __getattr__(name):
+    if name == "PROVIDER":
+        return _provider()
+    if name == "LOGIT_PRECISION":
+        return _logit_precision()
+    if name == "MODEL_VERSION":
+        return _get_model_version()
+    raise AttributeError(f"module 'pymrsf.core' has no attribute {name!r}")

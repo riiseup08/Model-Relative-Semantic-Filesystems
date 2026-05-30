@@ -12,7 +12,7 @@ def _patch_api():
     return (
         patch("pymrsf.rag.provider_capabilities", return_value=FAKE_CAPS_API),
         patch("pymrsf.rag.embed", return_value=FAKE_EMBED),
-        patch("pymrsf.rag.probe", None),
+        patch("pymrsf.rag._get_probe", return_value=None),
     )
 
 

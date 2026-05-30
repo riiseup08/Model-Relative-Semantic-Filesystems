@@ -1,25 +1,11 @@
 """
 pymrsf.embeddings — Multi-provider embeddings
 
+All settings are read from pymrsf.Config (seeded from environment variables).
 Supports:
   - Local (Ollama)  : nomic-embed-text via Ollama API (default)
   - OpenAI          : text-embedding-ada-002 via OpenAI API
-  - Anthropic       : text embeddings via Anthropic API (falls back to Ollama
-                      only when PYMRSF_ALLOW_PROVIDER_FALLBACK=true)
-
-Configuration:
-  - PYMRSF_OLLAMA_BASE              : Ollama API base URL (default: http://localhost:11434)
-  - PYMRSF_EMBED_MODEL              : Embedding model name (default: nomic-embed-text)
-  - PYMRSF_EMBED_TIMEOUT            : Request timeout in seconds (default: 30)
-  - PYMRSF_PROVIDER                 : Provider used to route embedding strategy
-  - PYMRSF_ALLOW_PROVIDER_FALLBACK  : Allow silent fallback to another provider on failure
-                                       (default: false — fail-fast for safety)
-  - OPENAI_API_KEY                  : Required for OpenAI embeddings
-  - ANTHROPIC_API_KEY               : Required for Anthropic embeddings
-
-Production note:
-  By default (PYMRSF_ALLOW_PROVIDER_FALLBACK=false), any provider failure raises
-  RuntimeError immediately. Set to "true" to enable fallback with a warning log.
+  - Anthropic       : routes to Ollama (Anthropic deprecated their embedding API)
 """
 
 import logging
@@ -31,11 +17,11 @@ from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponen
 
 
 def _cfg():
-    """Return the current Config, falling back to env vars if pymrsf isn't fully initialised yet."""
+    """Return the current Config, or None if pymrsf isn't fully initialised."""
     try:
-        from pymrsf import _config
-        return _config
-    except ImportError:
+        import pymrsf
+        return pymrsf._config
+    except (ImportError, AttributeError):
         return None
 
 _logger = logging.getLogger("pymrsf.embeddings")
@@ -65,13 +51,6 @@ def _log_retry(retry_state) -> None:
         retry_state.outcome.exception(),
     )
 
-# Environment variable configuration — read at call time via get_config() (Task 3.3)
-# These module-level defaults remain for backward compat with existing .env setups.
-OLLAMA_BASE   = os.getenv("PYMRSF_OLLAMA_BASE",  "http://localhost:11434")
-EMBED_MODEL   = os.getenv("PYMRSF_EMBED_MODEL",  "nomic-embed-text")
-EMBED_TIMEOUT = int(os.getenv("PYMRSF_EMBED_TIMEOUT", "30"))
-PROVIDER      = os.getenv("PYMRSF_PROVIDER", "local").lower()
-
 # Embedding dimension — lazily initialised under a lock (Task 2.5)
 _embed_dim_cache: int | None = None
 _embed_dim_lock = threading.Lock()
@@ -89,9 +68,9 @@ _embed_dim_lock = threading.Lock()
 def _embed_with_ollama(text: str) -> np.ndarray:
     import requests
     cfg     = _cfg()
-    base    = (cfg.ollama_base   if cfg else None) or os.getenv("PYMRSF_OLLAMA_BASE", OLLAMA_BASE)
-    model   = (cfg.embed_model   if cfg else None) or os.getenv("PYMRSF_EMBED_MODEL", EMBED_MODEL)
-    timeout = (cfg.embed_timeout if cfg else None) or int(os.getenv("PYMRSF_EMBED_TIMEOUT", str(EMBED_TIMEOUT)))
+    base    = cfg.ollama_base if cfg else os.getenv("PYMRSF_OLLAMA_BASE", "http://localhost:11434")
+    model   = cfg.embed_model if cfg else os.getenv("PYMRSF_EMBED_MODEL", "nomic-embed-text")
+    timeout = cfg.embed_timeout if cfg else int(os.getenv("PYMRSF_EMBED_TIMEOUT", "30"))
     r = requests.post(
         f"{base}/api/embed",
         json={"model": model, "input": text},
@@ -113,40 +92,12 @@ def _embed_with_openai(text: str) -> np.ndarray:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OpenAI embeddings require OPENAI_API_KEY environment variable.")
-    cfg   = _cfg()
-    model = (cfg.embed_model if cfg else None) or os.getenv("PYMRSF_EMBED_MODEL", "text-embedding-ada-002")
+    cfg = _cfg()
+    configured = cfg.embed_model if cfg else os.getenv("PYMRSF_EMBED_MODEL", "nomic-embed-text")
+    model = configured if configured.startswith("text-embedding") else "text-embedding-ada-002"
     client = OpenAI(api_key=api_key)
     r = client.embeddings.create(input=text, model=model)
     return np.array(r.data[0].embedding, dtype="float32")
-
-
-def _embed_with_anthropic(text: str) -> np.ndarray:
-    """Embed via Anthropic. Falls back to Ollama only if PYMRSF_ALLOW_PROVIDER_FALLBACK=true."""
-    allow_fallback = os.getenv("PYMRSF_ALLOW_PROVIDER_FALLBACK", "false").lower() == "true"
-    try:
-        from anthropic import Anthropic
-        api_key = os.getenv("ANTHROPIC_API_KEY")
-        if not api_key:
-            raise RuntimeError("Anthropic embeddings require ANTHROPIC_API_KEY environment variable.")
-        client = Anthropic(api_key=api_key)
-        r = client.embeddings.create(
-            model=os.getenv("PYMRSF_EMBED_MODEL", "claude-3-haiku-20240307"),
-            input=text,
-        )
-        return np.array(r.embedding, dtype="float32")
-    except (ImportError, AttributeError) as exc:
-        if allow_fallback:
-            _logger.warning(
-                "PROVIDER FALLBACK: anthropic → ollama. "
-                "Anthropic embedding API unavailable (%s). "
-                "Text routed to Ollama. Set PYMRSF_ALLOW_PROVIDER_FALLBACK=false to disable.",
-                exc,
-            )
-            return _embed_with_ollama(text)
-        raise RuntimeError(
-            f"Anthropic embedding API unavailable: {exc}. "
-            "Set PYMRSF_ALLOW_PROVIDER_FALLBACK=true to enable automatic fallback to Ollama."
-        ) from exc
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -154,8 +105,8 @@ def _embed_with_anthropic(text: str) -> np.ndarray:
 def embed(text: str) -> np.ndarray:
     """Generate an embedding vector for text using the configured provider.
 
-    By default (PYMRSF_ALLOW_PROVIDER_FALLBACK=false) any provider failure
-    raises RuntimeError immediately — no silent re-routing.
+    By default (allow_provider_fallback=False) any provider failure raises
+    RuntimeError immediately — no silent re-routing.
 
     Args:
         text: Text to embed.
@@ -167,13 +118,16 @@ def embed(text: str) -> np.ndarray:
         RuntimeError: If the configured provider fails and fallback is disabled.
     """
     cfg = _cfg()
-    provider = ((cfg.provider if cfg else None) or os.getenv("PYMRSF_PROVIDER", PROVIDER)).lower()
-    allow_fallback = os.getenv("PYMRSF_ALLOW_PROVIDER_FALLBACK", "false").lower() == "true"
+    provider = cfg.provider if cfg else os.getenv("PYMRSF_PROVIDER", "local").lower()
+    allow_fallback = cfg.allow_provider_fallback if cfg else (
+        os.getenv("PYMRSF_ALLOW_PROVIDER_FALLBACK", "false").lower() == "true"
+    )
 
     if provider == "openai":
         result = _embed_with_openai(text)
     elif provider == "anthropic":
-        result = _embed_with_anthropic(text)
+        # Anthropic deprecated their embedding API; route to Ollama
+        result = _embed_with_ollama(text)
     else:
         # local provider — use Ollama
         try:
@@ -183,7 +137,8 @@ def embed(text: str) -> np.ndarray:
                 _logger.warning(
                     "PROVIDER FALLBACK: local/ollama → openai. "
                     "Ollama embedding failed (%s). "
-                    "Text routed to OpenAI. Set PYMRSF_ALLOW_PROVIDER_FALLBACK=false to disable.",
+                    "Text routed to OpenAI. "
+                    "Call pymrsf.configure(allow_provider_fallback=False) to disable.",
                     ollama_exc,
                 )
                 result = _embed_with_openai(text)
@@ -191,18 +146,18 @@ def embed(text: str) -> np.ndarray:
                 raise RuntimeError(
                     f"Ollama embedding failed: {ollama_exc}. "
                     "Ensure Ollama is running with: ollama pull nomic-embed-text\n"
-                    "Set PYMRSF_ALLOW_PROVIDER_FALLBACK=true to enable automatic fallback to OpenAI."
+                    "Call pymrsf.configure(allow_provider_fallback=True) to enable "
+                    "automatic fallback to OpenAI."
                 ) from ollama_exc
 
-    # Validate dimension consistency — write once under lock (Task 2.5)
+    # Validate dimension consistency — benign race on write (same value)
     global _embed_dim_cache
-    if _embed_dim_cache is None:
-        with _embed_dim_lock:
-            if _embed_dim_cache is None:  # double-checked
-                _embed_dim_cache = len(result)
-    elif len(result) != _embed_dim_cache:
+    cached_dim = _embed_dim_cache  # lock-free snapshot
+    if cached_dim is None:
+        _embed_dim_cache = len(result)
+    elif len(result) != cached_dim:
         raise RuntimeError(
-            f"Embedding dimension mismatch: expected {_embed_dim_cache}, got {len(result)}. "
+            f"Embedding dimension mismatch: expected {cached_dim}, got {len(result)}. "
             "This may happen if the embedding model changed between calls."
         )
 
@@ -219,11 +174,12 @@ def get_embedding_dim() -> int:
     if _embed_dim_cache is not None:
         return _embed_dim_cache
 
-    with _embed_dim_lock:
-        if _embed_dim_cache is None:
-            try:
-                embed("test")
-            except Exception:
-                provider = os.getenv("PYMRSF_PROVIDER", PROVIDER).lower()
+    try:
+        embed("test")  # outside any lock — embed() sets _embed_dim_cache
+    except Exception:
+        cfg = _cfg()
+        provider = cfg.provider if cfg else os.getenv("PYMRSF_PROVIDER", "local").lower()
+        with _embed_dim_lock:
+            if _embed_dim_cache is None:
                 _embed_dim_cache = 1536 if provider == "openai" else 768
     return _embed_dim_cache
